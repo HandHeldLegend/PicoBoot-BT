@@ -1,0 +1,3 @@
+[submodule "bluepad32"]
+	path = bluepad32
+	url = https://github.com/HandHeldLegend/bluepad32

@@ -3,34 +3,69 @@
  *
  * SPDX-License-Identifier: GPL-2.0-only
  */
-
-#include <stdio.h>
-#include "pico/stdlib.h"
-#include "hardware/pio.h"
-#include "hardware/clocks.h"
-#include "hardware/dma.h"
-#include "hardware/structs/bus_ctrl.h"
+#include "global_include.h"
 #include "picoboot.pio.h"
 #include "ipl.h"
 
-const uint PIN_LED = 25;                // Status LED
-const uint PIN_DATA_BASE = 6;           // Base pin used for output, 4 consecutive pins are used 
-const uint PIN_CS = 4;                 // U10 chip select
-const uint PIN_CLK = 5;                // EXI bus clock line
+// Sanity check
+#ifndef CONFIG_BLUEPAD32_PLATFORM_CUSTOM
+#error "Pico W must use BLUEPAD32_PLATFORM_CUSTOM"
+#endif
+
+// Defined in my_platform.c
+struct uni_platform *get_my_platform(void);
+
+void bluepad_core_task()
+{
+	// initialize CYW43 driver architecture (will enable BT if/because CYW43_ENABLE_BLUETOOTH == 1)
+	if (cyw43_arch_init()) {
+		loge("failed to initialise cyw43_arch\n");
+		return;
+	}
+
+	// Turn-on LED. Turn it off once init is done.
+	cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+
+	// Must be called before uni_main()
+	uni_platform_set_custom(get_my_platform());
+
+	// Initialize BP32
+	uni_init(0, NULL);
+
+	// Does not return.
+	btstack_run_loop_execute();
+}
+
+void core1()
+{   
+    for(;;)
+    {
+        busy_wait_ms(1);
+        gamecube_comms_task();
+    }
+}
+
+    
 
 void main()
 {
     // Initialize and light up builtin LED, it will basically
     // act as a power LED.
     // TODO: Use the LED to signalize system faults?
-    gpio_init(PIN_LED);
-    gpio_set_dir(PIN_LED, GPIO_OUT);
-    gpio_put(PIN_LED, true);
+    //gpio_init(PIN_LED);
+    //gpio_set_dir(PIN_LED, GPIO_OUT);
+    //gpio_put(PIN_LED, true);
+    stdio_init_all();
+
+    sleep_ms(500);
+    printf("STARTED!");
 
     // Set 250MHz clock to get more cycles in between CLK pulses.
     // This is the lowest value I was able to make the code work.
     // Should be still considered safe for most Pico boards.
-    set_sys_clock_khz(250000, true);
+    set_sys_clock_khz(SYS_CLK_SPEED, true);
+
+    /*
 
     // Prioritize DMA engine as it does the most work
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
@@ -102,8 +137,9 @@ void main()
     // Start PIO state machines
     pio_sm_set_enabled(pio, transfer_start_sm, true);
     pio_sm_set_enabled(pio, clocked_output_sm, true);
+    */
 
-    while (true) {
-        tight_loop_contents();
-    }
+    multicore_launch_core1(core1);
+
+    bluepad_core_task();
 }
