@@ -1,0 +1,99 @@
+;
+; Copyright (c) Hand Held Legend, LLC 2023
+;
+
+.program joybus
+.side_set 1 optional
+
+; Repeatedly get one word of data from the TX FIFO, stalling when the FIFO is
+; empty. Write the least significant bit to the OUT pin group.
+
+.wrap_target
+; First lets focus on counting pulses
+PUBLIC joybusin:
+  set pindirs, 0
+bytestart:
+  set x, 7 ; Set x scratch register as bit counter to allow 8 loops
+bitloop:
+  wait 1 pin, 0     ; Wait for line HIGH
+  wait 0 pin, 0 [7]
+  nop
+  ; Get the level and put it into ISR
+  in pins, 1
+  ; Decrement x and jump to bitloop if we aren't at 0 yet
+  jmp x-- bitloop
+completed:
+  ; Set interrupt, do not wait for it to clear
+  irq nowait 1
+  nop side 1
+  jmp bytestart
+
+PUBLIC joybusout:
+    nop [7]
+output:
+    set pindirs, 0 side 1
+    out x, 1        side 1 [2] ;Side-set still takes place when instruction stalls
+    set pindirs, 1 side 0
+    jmp !x do_zero   side 0 [2]; Branch on the bit we shifted out. low pulse
+do_one:
+    set pindirs, 0 side 1
+    jmp !osre output side 1 [6] ; Drive high extended
+    jmp do_end
+do_zero:
+    set pindirs, 1 side 0
+    jmp !osre output side 0 [6]
+    set pindirs, 0 side 1
+do_end:
+    set pindirs, 0 side 1 [2]
+    set pindirs, 1 side 0 [3]
+    set pindirs, 0 side 1
+    irq nowait 0
+    jmp output
+.wrap
+
+% c-sdk {
+static inline void joybus_set_in(bool in, PIO pio, uint sm, uint offset, pio_sm_config *c, uint pin)
+{
+    // Disable SM
+    pio_sm_set_enabled(pio, sm, false);
+    if (in)
+    {
+        pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+        pio_sm_init(pio, sm, offset + joybus_offset_joybusin, c);
+    }
+    else
+    {
+        pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+        pio_sm_init(pio, sm, offset + joybus_offset_joybusout, c);
+    }
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void joybus_program_init(uint32_t clk_sys, PIO pio, uint sm, uint offset, uint pin, pio_sm_config *c) {
+    *c = joybus_program_get_default_config(offset);
+
+    gpio_init(pin);
+
+    // Set this pin's GPIO function (connect PIO to the pad)
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+
+    sm_config_set_in_pins(c, pin);
+    sm_config_set_out_pins(c, pin, 1);
+    sm_config_set_jmp_pin(c, pin);
+
+    // Must run 12800000hz
+    float div = 62.5f; //clock_get_hz(clk_sys) / (4000000);
+    sm_config_set_clkdiv(c, div);
+
+    // Set sideset pin
+    sm_config_set_sideset_pins(c, pin);
+    sm_config_set_in_shift(c, false, true, 8);
+    sm_config_set_out_shift(c, false, true, 8);
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, c);
+    // Set the state machine running
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
