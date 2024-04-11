@@ -62,7 +62,7 @@ static void my_platform_on_init_complete(void) {
         uni_bt_list_keys_unsafe();
 
     // Turn off LED once init is done.
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    //cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 
     //    uni_bt_service_set_enabled(true);
 

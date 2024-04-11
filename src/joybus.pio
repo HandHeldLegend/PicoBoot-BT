@@ -29,7 +29,6 @@ completed:
   jmp bytestart
 
 PUBLIC joybusout:
-    nop [7]
 output:
     set pindirs, 0 side 1
     out x, 1        side 1 [2] ;Side-set still takes place when instruction stalls

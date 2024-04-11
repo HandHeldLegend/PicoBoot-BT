@@ -1,2 +1,8 @@
 
 src/ipl.h
+
+build/
+
+.vscode/
+
+iplboot.dol

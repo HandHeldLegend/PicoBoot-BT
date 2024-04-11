@@ -5,6 +5,7 @@
 #include "types.h"
 #include <pico/multicore.h>
 #include "hardware/dma.h"
+#include <pico/cyw43_arch.h>
 
 #include <uni.h>
 #include <uni_hid_device.h>
@@ -23,6 +24,8 @@
 #define GAMEPAD_SM 0
 
 #define CLAMP_0_255(value) ((value) < 0 ? 0 : ((value) > 255 ? 255 : (value)))
+
+#define JOYBUS_CHANNELS 4
 
 // This is a function that will return
 // offers the ability to restart the timer
@@ -67,7 +70,7 @@ uint _gamecube_irq_tx;
 uint _gamecube_offset;
 pio_sm_config _gamecube_c[4];
 
-volatile bool _gc_got_data = false;
+volatile bool _gc_got_data[4];
 bool _gc_running = false;
 bool _gc_rumble = false;
 
@@ -80,6 +83,7 @@ typedef struct
 {
   uint8_t byteCounter; // How many bytes left to read before we must respond
   uint8_t workingCmd;  // The current working command we received
+  bool lock; // Lock so it doesn't get interrupted
   bool rumble;         // if rumble is enabled or not
   int dma;
 } joybus_state_s;
@@ -95,53 +99,43 @@ auto_init_mutex(_gamepad_mutex);
 #define ALIGNED_JOYBUS_8(val) ((val) << 24)
 
 volatile uint8_t _cannedProbe[3] = {0x09, 0x00, 0x03};
+volatile uint8_t _cannedProbe2[3] = {0x09, 0x00, 0x03};
+volatile uint8_t _cannedProbeTX[4][3];
 volatile uint8_t _cannedOrigin[10] = {0x00, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00, 0x00};
+volatile uint8_t _cannedOriginTX[4][10];
 
 void _gamecube_send_probe(uint sm)
 {
-  dma_channel_configure(
-        _joybus_state[sm].dma,
-        &(_joybus_dma_config[sm]),
-        &pio0_hw->txf[sm], // Write address (only need to set this once)
-        _cannedProbe,
-        3, // Write the same value many times
-        true             // Don't start yet
-    );
+  dma_channel_set_trans_count(_joybus_state[sm].dma, 3, false);
+  dma_channel_set_read_addr(_joybus_state[sm].dma, &(_cannedProbeTX[sm]), true);
 }
 
 void _gamecube_send_origin(uint sm)
 {
-  dma_channel_configure(
-        _joybus_state[sm].dma,
-        &(_joybus_dma_config[sm]),
-        &pio0_hw->txf[sm], // Write address (only need to set this once)
-        _cannedOrigin,
-        10, // Write the same value many times
-        true             // Don't start yet
-    );
+  dma_channel_set_trans_count(_joybus_state[sm].dma, 10, false);
+  dma_channel_set_read_addr(_joybus_state[sm].dma, &(_cannedOriginTX[sm]), true);
 }
 
 void _gamecube_send_poll(uint sm)
 {
   _out_buffer[sm].button_a = 1;
 
-  dma_channel_configure(
-        _joybus_state[sm].dma,
-        &(_joybus_dma_config[sm]),
-        &pio0_hw->txf[sm], // Write address (only need to set this once)
-        &(_out_buffer[sm]),
-        8, // Write the same value many times
-        true             // Don't start yet
-    );
+  dma_channel_set_trans_count(_joybus_state[sm].dma, 8, false);
+  dma_channel_set_read_addr(_joybus_state[sm].dma, &(_out_buffer[sm]), true);
 }
 
 void _gamecube_reset_state(uint sm)
 {
-  joybus_set_in(true, GAMEPAD_PIO, GAMEPAD_SM, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+  joybus_set_in(true, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+  _joybus_state[sm].byteCounter = 3;
+  _joybus_state[sm].workingCmd = 0x00;
 }
 
-void __time_critical_func(_gamecube_command_handler)(uint sm)
+// Returns true if we are at the end of a command area (start response)
+bool __time_critical_func(_gamecube_command_handler)(uint sm)
 {
+  bool ret = false;
+
   if (_joybus_state[sm].workingCmd == 0x40)
   {
 
@@ -151,22 +145,31 @@ void __time_critical_func(_gamecube_command_handler)(uint sm)
     {
       _joybus_state[sm].rumble = ((dat & 0x1) > 0) ? true : false;
 
+      _joybus_state[sm].byteCounter = 3;
       joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+      pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, false);
       _gamecube_send_poll(sm);
+      
+      ret = true;
     }
 
   }
   else
   {
     _joybus_state[sm].workingCmd = pio_sm_get(GAMEPAD_PIO, sm);
+
     switch (_joybus_state[sm].workingCmd)
     {
     default:
       break;
     case 0x00:
 
+      _joybus_state[sm].byteCounter = 3;
       joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+      pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, false);
       _gamecube_send_probe(sm);
+      
+      ret = true;
       break;
 
     case 0x40:
@@ -175,30 +178,65 @@ void __time_critical_func(_gamecube_command_handler)(uint sm)
 
     case 0x41:
 
+      _joybus_state[sm].byteCounter = 3;
       joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+      pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, false);
       _gamecube_send_origin(sm);
+      
+      ret = true;
       break;
     }
   }
+
+  return ret;
 }
+
+volatile bool t = false;
 
 static void _gamecube_isr_rxgot(void)
 {
+  irq_set_enabled(_gamecube_irq_rx, false);
   if (pio_interrupt_get(GAMEPAD_PIO, 1))
   {
-    _gamecube_command_handler(0);
+    t = true;
     pio_interrupt_clear(GAMEPAD_PIO, 1);
+    uint8_t load = 0;
+
+    for(uint i = 0; i < JOYBUS_CHANNELS; i++)
+    {
+        if(!pio_sm_is_rx_fifo_empty(GAMEPAD_PIO, i))
+        {
+          _gc_got_data[i] = true;
+          _gamecube_command_handler(i);
+        }
+    }
+
+    // Resume TX
+    pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, true);
+    
   }
+  irq_set_enabled(_gamecube_irq_rx, true);
 }
 
 static void _gamecube_isr_txdone(void)
 {
+  irq_set_enabled(_gamecube_irq_tx, false);
+
   if (pio_interrupt_get(GAMEPAD_PIO, 0))
   {
-    _joybus_state[0].byteCounter = 3;
-    joybus_set_in(true, GAMEPAD_PIO, 0, _gamecube_offset, &(_gamecube_c[0]), PIN_JOYBUS_BASE);
     pio_interrupt_clear(GAMEPAD_PIO, 0);
+    //sleep_us(150);
+    
+    
+    for(uint i = 0; i < 4; i++)
+    {
+      _joybus_state[i].byteCounter = 3;
+      joybus_set_in(true, GAMEPAD_PIO, i, _gamecube_offset, &(_gamecube_c[i]), PIN_JOYBUS_BASE+i);
+    }
   }
+
+  irq_set_enabled(_gamecube_irq_tx, true);
+  
 }
 
 void gamecube_comms_update(int idx, uni_gamepad_t *gp)
@@ -209,9 +247,11 @@ void gamecube_comms_update(int idx, uni_gamepad_t *gp)
   mutex_exit(&_gamepad_mutex);
 }
 
+interval_s interval[4];
+
 void gamecube_comms_task()
 {
-  static interval_s interval = {0};
+  
 
   if (!_gc_running)
   {
@@ -226,17 +266,29 @@ void gamecube_comms_task()
 
     irq_set_exclusive_handler(_gamecube_irq_tx, _gamecube_isr_txdone);
     irq_set_exclusive_handler(_gamecube_irq_rx, _gamecube_isr_rxgot);
-    
-    joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, GAMEPAD_SM, _gamecube_offset, PIN_JOYBUS_BASE, &(_gamecube_c[0]));
-    _joybus_state[0].dma = dma_claim_unused_channel(true);
-    _joybus_dma_config[0] = dma_channel_get_default_config(_joybus_state[0].dma);
-    channel_config_set_transfer_data_size(&(_joybus_dma_config[0]), DMA_SIZE_8);
-    channel_config_set_read_increment(&(_joybus_dma_config[0]), true);
-    channel_config_set_dreq(&(_joybus_dma_config[0]), DREQ_PIO0_TX0);
 
-    // joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, GAMEPAD_SM + 1, _gamecube_offset, PIN_JOYBUS_BASE + 1, &(_gamecube_c[1]));
-    // joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, GAMEPAD_SM + 2, _gamecube_offset, PIN_JOYBUS_BASE + 2, &_gamecube_c);
-    // joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, GAMEPAD_SM + 3, _gamecube_offset, PIN_JOYBUS_BASE + 3, &_gamecube_c);
+    for(uint i = 0; i < JOYBUS_CHANNELS; i++)
+    {
+      joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, i, _gamecube_offset, PIN_JOYBUS_BASE+i, &(_gamecube_c[i]));
+
+      memcpy(&(_cannedProbeTX[i]), _cannedProbe, 3);
+      memcpy(&(_cannedOriginTX[i]), _cannedOrigin, 10);
+
+      _joybus_state[i].dma = dma_claim_unused_channel(true);
+      _joybus_dma_config[i] = dma_channel_get_default_config(_joybus_state[i].dma);
+      channel_config_set_transfer_data_size(&(_joybus_dma_config[i]), DMA_SIZE_8);
+      channel_config_set_read_increment(&(_joybus_dma_config[i]), true);
+      channel_config_set_dreq(&(_joybus_dma_config[i]), DREQ_PIO0_TX0+i);
+
+      dma_channel_configure(
+          _joybus_state[i].dma,
+          &(_joybus_dma_config[i]),
+          &pio0_hw->txf[i], // Write address (only need to set this once)
+          &(_cannedProbeTX[i]),
+          3, // Write the same value many times
+          false             // Don't start yet
+      );
+    }
 
     irq_set_enabled(_gamecube_irq_tx, true);
     irq_set_enabled(_gamecube_irq_rx, true);
@@ -245,13 +297,20 @@ void gamecube_comms_task()
   else
   {
     uint32_t timestamp = time_us_32();
-    if (interval_resettable_run(timestamp, 100000, _gc_got_data, &interval))
+
+    for(uint i = 0; i < JOYBUS_CHANNELS; i++)
     {
-      _gamecube_reset_state(0);
-      sleep_ms(24);
+      if (interval_resettable_run(timestamp, 100000, _gc_got_data[i], &(interval[i])))
+      {
+        _gamecube_reset_state(i);
+      }
+      
+      if(_gc_got_data[i])
+      {
+        _gc_got_data[i] = false;
+      }
     }
-    else
-    {
+
       if (mutex_enter_timeout_ms(&_gamepad_mutex, 1))
       {
         _out_buffer[0].blank_2 = 1;
@@ -283,6 +342,5 @@ void gamecube_comms_task()
         int outr = 0;
         mutex_exit(&_gamepad_mutex);
       }
-    }
   }
 }
