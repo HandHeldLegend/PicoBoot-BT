@@ -74,8 +74,8 @@ volatile bool _gc_got_data[4];
 bool _gc_running = false;
 bool _gc_rumble = false;
 
-uint8_t _gamecube_out_buffer[8] = {0};
-volatile uint8_t _gamecube_in_buffer[8] = {0};
+
+volatile gamecube_input_s _in_buffer[4] = {0};
 volatile gamecube_input_s _out_buffer[4] = {0};
 volatile uint8_t _dmaOut[4][8];
 
@@ -89,7 +89,10 @@ typedef struct
 } joybus_state_s;
 
 volatile joybus_state_s _joybus_state[4];
-volatile uni_gamepad_t _internal_gamepad[4];
+
+volatile uni_gamepad_t _incoming_gamepad[4];
+volatile bool _in_buffer_update = false;
+
 dma_channel_config _joybus_dma_config[4];
 
 uint32_t _gamepad_owner_0;
@@ -99,9 +102,8 @@ auto_init_mutex(_gamepad_mutex);
 #define ALIGNED_JOYBUS_8(val) ((val) << 24)
 
 volatile uint8_t _cannedProbe[3] = {0x09, 0x00, 0x03};
-volatile uint8_t _cannedProbe2[3] = {0x09, 0x00, 0x03};
 volatile uint8_t _cannedProbeTX[4][3];
-volatile uint8_t _cannedOrigin[10] = {0x00, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00, 0x00};
+volatile uint8_t _cannedOrigin[10] = {0x00, 128, 128, 128, 128, 128, 0x00, 0x00, 0x00, 0x00};
 volatile uint8_t _cannedOriginTX[4][10];
 
 void _gamecube_send_probe(uint sm)
@@ -118,8 +120,6 @@ void _gamecube_send_origin(uint sm)
 
 void _gamecube_send_poll(uint sm)
 {
-  _out_buffer[sm].button_a = 1;
-
   dma_channel_set_trans_count(_joybus_state[sm].dma, 8, false);
   dma_channel_set_read_addr(_joybus_state[sm].dma, &(_out_buffer[sm]), true);
 }
@@ -131,62 +131,88 @@ void _gamecube_reset_state(uint sm)
   _joybus_state[sm].workingCmd = 0x00;
 }
 
+#define BYTECOUNT_DEFAULT 2
+
 // Returns true if we are at the end of a command area (start response)
-bool __time_critical_func(_gamecube_command_handler)(uint sm)
+bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
 {
   bool ret = false;
+  uint8_t dat = 0;
 
-  if (_joybus_state[sm].workingCmd == 0x40)
+  if(_joybus_state[sm].byteCounter==BYTECOUNT_DEFAULT)
   {
+    _joybus_state[sm].workingCmd = pio_sm_get(GAMEPAD_PIO, sm);
+  }
+  else
+  {
+    dat = pio_sm_get(GAMEPAD_PIO, sm);
+  }
+ 
+  switch (_joybus_state[sm].workingCmd)
+  {
+  default:
+    break;
 
-    _joybus_state[sm].byteCounter -= 1;
-    uint8_t dat = pio_sm_get(GAMEPAD_PIO, sm);
+  case 0x42:
+    if(_joybus_state[sm].byteCounter == 0)
+    {
+      _gc_got_data[sm] = true;
+      _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+      
+      joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+      pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
+      _gamecube_send_origin(sm);
+      pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), true);
+    }
+  break;
+
+
+  case 0x40:
+
     if (_joybus_state[sm].byteCounter == 0)
     {
       _joybus_state[sm].rumble = ((dat & 0x1) > 0) ? true : false;
 
-      _joybus_state[sm].byteCounter = 3;
+      _gc_got_data[sm] = true;
+      _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+      
       joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
-      pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, false);
+      pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
       _gamecube_send_poll(sm);
+      pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), true);
       
       ret = true;
     }
 
+  break;
+
+  
+  case 0x00:
+    _gc_got_data[sm] = true;
+    _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+    joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+    pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
+    _gamecube_send_probe(sm);
+    pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), true);
+    
+    ret = true;
+    break;
+
+  case 0x41:
+    _gc_got_data[sm] = true;
+    _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+    
+    joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
+    pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
+    _gamecube_send_origin(sm);
+    pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), true);
+    
+    ret = true;
+    break;
   }
-  else
-  {
-    _joybus_state[sm].workingCmd = pio_sm_get(GAMEPAD_PIO, sm);
 
-    switch (_joybus_state[sm].workingCmd)
-    {
-    default:
-      break;
-    case 0x00:
-
-      _joybus_state[sm].byteCounter = 3;
-      joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
-      pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, false);
-      _gamecube_send_probe(sm);
-      
-      ret = true;
-      break;
-
-    case 0x40:
-      _joybus_state[sm].byteCounter = 2;
-      break;
-
-    case 0x41:
-
-      _joybus_state[sm].byteCounter = 3;
-      joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), PIN_JOYBUS_BASE + sm);
-      pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, false);
-      _gamecube_send_origin(sm);
-      
-      ret = true;
-      break;
-    }
-  }
+  if(!ret)
+  _joybus_state[sm].byteCounter -= 1;
 
   return ret;
 }
@@ -198,21 +224,13 @@ static void _gamecube_isr_rxgot(void)
   irq_set_enabled(_gamecube_irq_rx, false);
   if (pio_interrupt_get(GAMEPAD_PIO, 1))
   {
-    t = true;
     pio_interrupt_clear(GAMEPAD_PIO, 1);
-    uint8_t load = 0;
 
     for(uint i = 0; i < JOYBUS_CHANNELS; i++)
     {
         if(!pio_sm_is_rx_fifo_empty(GAMEPAD_PIO, i))
-        {
-          _gc_got_data[i] = true;
-          _gamecube_command_handler(i);
-        }
+        _gamecube_command_handler(i, 0);
     }
-
-    // Resume TX
-    pio_set_sm_mask_enabled(GAMEPAD_PIO, 0b1111, true);
     
   }
   irq_set_enabled(_gamecube_irq_rx, true);
@@ -242,8 +260,9 @@ static void _gamecube_isr_txdone(void)
 void gamecube_comms_update(int idx, uni_gamepad_t *gp)
 {
   mutex_enter_blocking(&_gamepad_mutex);
-  _internal_gamepad[0].buttons = gp->buttons;
-  // memcpy(&(_internal_gamepad[idx]), gp, sizeof(uni_gamepad_t));
+  _incoming_gamepad[0].buttons = gp->buttons;
+  _incoming_gamepad[0].dpad = gp->dpad;
+  _in_buffer_update = true;
   mutex_exit(&_gamepad_mutex);
 }
 
@@ -255,6 +274,17 @@ void gamecube_comms_task()
 
   if (!_gc_running)
   {
+
+    for(uint i = 0; i < 4; i++)
+    {
+      _out_buffer[i].blank_2 = 1;
+      _out_buffer[i].stick_left_x = 127;
+      _out_buffer[i].stick_left_y = 127;
+
+      _out_buffer[i].stick_right_x = 127;
+      _out_buffer[i].stick_right_y = 127;
+    }
+
     sleep_ms(150);
     _gamecube_offset = pio_add_program(GAMEPAD_PIO, &joybus_program);
 
@@ -290,7 +320,7 @@ void gamecube_comms_task()
       );
     }
 
-    irq_set_enabled(_gamecube_irq_tx, true);
+    //irq_set_enabled(_gamecube_irq_tx, true);
     irq_set_enabled(_gamecube_irq_rx, true);
     _gc_running = true;
   }
@@ -304,43 +334,43 @@ void gamecube_comms_task()
       {
         _gamecube_reset_state(i);
       }
-      
-      if(_gc_got_data[i])
-      {
-        _gc_got_data[i] = false;
-      }
+      if (_gc_got_data[i]) _gc_got_data[i]=false;
     }
 
-      if (mutex_enter_timeout_ms(&_gamepad_mutex, 1))
+      if (_in_buffer_update)
       {
-        _out_buffer[0].blank_2 = 1;
-        _out_buffer[0].button_a        = (_internal_gamepad[0].buttons & BUTTON_A) ? true : false;
-        _out_buffer[0].button_b        = (_internal_gamepad[0].buttons & BUTTON_B) ? true : false;
-        _out_buffer[0].button_x        = (_internal_gamepad[0].buttons & BUTTON_X) ? true : false;
-        _out_buffer[0].button_y        = (_internal_gamepad[0].buttons & BUTTON_Y) ? true : false;
-        _out_buffer[0].button_start    = (_internal_gamepad[0].misc_buttons & MISC_BUTTON_HOME) ? true : false;
+        if(mutex_enter_timeout_ms(&_gamepad_mutex, 4))
+        {
+          _out_buffer[0].blank_2 = 1;
+          _out_buffer[0].button_a        = (_incoming_gamepad[0].buttons & BUTTON_A) ? true : false;
+          _out_buffer[0].button_b        = (_incoming_gamepad[0].buttons & BUTTON_B) ? true : false;
+          _out_buffer[0].button_x        = (_incoming_gamepad[0].buttons & BUTTON_X) ? true : false;
+          _out_buffer[0].button_y        = (_incoming_gamepad[0].buttons & BUTTON_Y) ? true : false;
+          _out_buffer[0].button_start    = (_incoming_gamepad[0].misc_buttons & MISC_BUTTON_HOME) ? true : false;
 
-        //_out_buffer.button_l = buttons->trigger_zl;
-        //_out_buffer.button_r = buttons->trigger_zr;
+          //_out_buffer.button_l = buttons->trigger_zl;
+          //_out_buffer.button_r = buttons->trigger_zr;
 
-        //float lx = (analog->lx * 0.0488f) + 28;
-        //float ly = (analog->ly * 0.0488f) + 28;
-        //float rx = (analog->rx * 0.0488f) + 28;
-        //float ry = (analog->ry * 0.0488f) + 28;
+          //float lx = (analog->lx * 0.0488f) + 28;
+          //float ly = (analog->ly * 0.0488f) + 28;
+          //float rx = (analog->rx * 0.0488f) + 28;
+          //float ry = (analog->ry * 0.0488f) + 28;
 
-        _out_buffer[0].stick_left_x = 127;//CLAMP_0_255(lx);
-        _out_buffer[0].stick_left_y = 127;//CLAMP_0_255(ly);
-        _out_buffer[0].stick_right_x = 127;//CLAMP_0_255(rx);
-        _out_buffer[0].stick_right_y = 127;//CLAMP_0_255(ry);
+          _out_buffer[0].stick_left_x = 127;//CLAMP_0_255(lx);
+          _out_buffer[0].stick_left_y = 127;//CLAMP_0_255(ly);
+          _out_buffer[0].stick_right_x = 127;//CLAMP_0_255(rx);
+          _out_buffer[0].stick_right_y = 127;//CLAMP_0_255(ry);
 
-        _out_buffer[0].dpad_down     = _internal_gamepad[0].dpad & DPAD_DOWN;
-        _out_buffer[0].dpad_left     = _internal_gamepad[0].dpad & DPAD_LEFT;
-        _out_buffer[0].dpad_right    = _internal_gamepad[0].dpad & DPAD_RIGHT;
-        _out_buffer[0].dpad_up       = _internal_gamepad[0].dpad & DPAD_UP;
+          _out_buffer[0].dpad_down     = (_incoming_gamepad[0].dpad & DPAD_DOWN) ? true : false;
+          _out_buffer[0].dpad_left     = (_incoming_gamepad[0].dpad & DPAD_LEFT) ? true : false;
+          _out_buffer[0].dpad_right    = (_incoming_gamepad[0].dpad & DPAD_RIGHT) ? true : false;
+          _out_buffer[0].dpad_up       = (_incoming_gamepad[0].dpad & DPAD_UP) ? true : false;
 
-        int outl = 0;
-        int outr = 0;
-        mutex_exit(&_gamepad_mutex);
+          int outl = 0;
+          int outr = 0;
+          _in_buffer_update = false;
+          mutex_exit(&_gamepad_mutex);
+        }
       }
   }
 }

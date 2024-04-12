@@ -26,7 +26,7 @@ static void trigger_event_on_gamepad(uni_hid_device_t* d);
 static void my_platform_init(int argc, const char** argv) {
     ARG_UNUSED(argc);
     ARG_UNUSED(argv);
-
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
     logi("my_platform: init()\n");
 
 #if 0
@@ -97,7 +97,7 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
     // Print device Id before dumping gamepad.
     logi("(%p) id=%d ", d, idx);
-    uni_controller_dump(ctl);
+    //uni_controller_dump(ctl);
 
     switch (ctl->klass) {
         case UNI_CONTROLLER_CLASS_GAMEPAD:

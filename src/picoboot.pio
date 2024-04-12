@@ -50,6 +50,7 @@ write_bit:
     set pindirs 0b10000         ; Leave data line floating so RTC-DOL can take over and load fonts etc.
 
 disable_chip:
+    ;irq nowait 1
     jmp disable_chip            ; Stay in the loop forever until power cycle
 
 % c-sdk {

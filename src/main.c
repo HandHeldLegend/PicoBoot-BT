@@ -29,8 +29,26 @@ const uint PIN_CLK = 5;                // EXI bus clock line
 #error "Pico W must use BLUEPAD32_PLATFORM_CUSTOM"
 #endif
 
+volatile bool picoboot_done = false;
+uint picoboot_done_irq;
+
+uint transfer_start_sm;
+uint transfer_start_offset;
+uint clocked_output_sm;
+uint clocked_output_offset;
+
 // Defined in my_platform.c
 struct uni_platform* get_my_platform(void);
+
+static void picoboot_done_isr(void)
+{
+    irq_set_enabled(picoboot_done_irq, false);
+    if(pio_interrupt_get(pio0, 1))
+    {
+        picoboot_done = true;
+        pio_interrupt_clear(pio0, 1);
+    }
+}
 
 void gamecube_task(void)
 {
@@ -50,9 +68,6 @@ void bluepad_core_task()
 		return;
 	}
 
-	// Turn-on LED. Turn it off once init is done.
-	cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-
 	// Must be called before uni_main()
 	uni_platform_set_custom(get_my_platform());
 
@@ -66,15 +81,10 @@ void bluepad_core_task()
 int main() {
     stdio_init_all();
 
-    set_sys_clock_khz(SYS_CLK_SPEED_KHZ, true);
-
-    sleep_ms(3000);
-    printf("Started...\n");
-
     // Set 250MHz clock to get more cycles in between CLK pulses.
     // This is the lowest value I was able to make the code work.
     // Should be still considered safe for most Pico boards.
-    set_sys_clock_khz(250000, true);
+    set_sys_clock_khz(SYS_CLK_SPEED_KHZ, true);
 
     // Prioritize DMA engine as it does the most work
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
@@ -84,12 +94,14 @@ int main() {
     gpio_set_slew_rate(PIN_DATA_BASE + 2, GPIO_SLEW_RATE_FAST);
     gpio_set_slew_rate(PIN_DATA_BASE + 3, GPIO_SLEW_RATE_FAST);
 
-    gpio_set_drive_strength(PIN_DATA_BASE, GPIO_DRIVE_STRENGTH_4MA);
-    gpio_set_drive_strength(PIN_DATA_BASE + 1, GPIO_DRIVE_STRENGTH_4MA);
-    gpio_set_drive_strength(PIN_DATA_BASE + 2, GPIO_DRIVE_STRENGTH_4MA);
-    gpio_set_drive_strength(PIN_DATA_BASE + 3, GPIO_DRIVE_STRENGTH_4MA);
+    gpio_set_drive_strength(PIN_DATA_BASE, GPIO_DRIVE_STRENGTH_8MA);
+    gpio_set_drive_strength(PIN_DATA_BASE + 1, GPIO_DRIVE_STRENGTH_8MA);
+    gpio_set_drive_strength(PIN_DATA_BASE + 2, GPIO_DRIVE_STRENGTH_8MA);
+    gpio_set_drive_strength(PIN_DATA_BASE + 3, GPIO_DRIVE_STRENGTH_8MA);
 
     PIO pio = pio0;
+
+    
 
     //
     // State Machine: Transfer Start
@@ -98,8 +110,8 @@ int main() {
     // when first 1 kilobyte transfer starts.
     //
 
-    uint transfer_start_sm = pio_claim_unused_sm(pio, true);
-    uint transfer_start_offset = pio_add_program(pio, &on_transfer_program);
+    transfer_start_sm = pio_claim_unused_sm(pio, true);
+    transfer_start_offset = pio_add_program(pio, &on_transfer_program);
 
     on_transfer_program_init(pio, transfer_start_sm, transfer_start_offset, PIN_CLK, PIN_CS, PIN_DATA_BASE);
 
@@ -115,8 +127,8 @@ int main() {
     // to output IPL data bits.
     //
 
-    uint clocked_output_sm = pio_claim_unused_sm(pio, true);
-    uint clocked_output_offset = pio_add_program(pio, &clocked_output_program);
+    clocked_output_sm = pio_claim_unused_sm(pio, true);
+    clocked_output_offset = pio_add_program(pio, &clocked_output_program);
 
     clocked_output_program_init(pio, clocked_output_sm, clocked_output_offset, PIN_DATA_BASE, PIN_CLK, PIN_CS);
 
@@ -147,12 +159,21 @@ int main() {
     pio_sm_set_enabled(pio, transfer_start_sm, true);
     pio_sm_set_enabled(pio, clocked_output_sm, true);
 
-    return 0;
-    
+    sleep_ms(800);
+
+    // Clean up before we move to bluetooth nonsense
+    pio_sm_set_enabled(pio0, transfer_start_sm, false);
+    pio_sm_set_enabled(pio0, clocked_output_sm, false);
+
+    pio_sm_unclaim(pio0, transfer_start_sm);
+    pio_sm_unclaim(pio0, clocked_output_sm);
+
+    pio_clear_instruction_memory(pio0);
+
     multicore_launch_core1(bluepad_core_task);
 
     for(;;)
-    {
+    {  
         gamecube_task();
     }
 

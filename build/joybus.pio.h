@@ -30,21 +30,21 @@ static const uint16_t joybus_program_instructions[] = {
     0xc001, //  7: irq    nowait 1                   
     0xb842, //  8: nop                    side 1     
     0x0001, //  9: jmp    1                          
-    0xf880, // 10: set    pindirs, 0      side 1     
-    0x7a21, // 11: out    x, 1            side 1 [2] 
-    0xf081, // 12: set    pindirs, 1      side 0     
-    0x1231, // 13: jmp    !x, 17          side 0 [2] 
-    0xf880, // 14: set    pindirs, 0      side 1     
-    0x1eea, // 15: jmp    !osre, 10       side 1 [6] 
-    0x0014, // 16: jmp    20                         
-    0xf081, // 17: set    pindirs, 1      side 0     
-    0x16ea, // 18: jmp    !osre, 10       side 0 [6] 
-    0xf880, // 19: set    pindirs, 0      side 1     
-    0xfa80, // 20: set    pindirs, 0      side 1 [2] 
-    0xf381, // 21: set    pindirs, 1      side 0 [3] 
-    0xf880, // 22: set    pindirs, 0      side 1     
-    0xc000, // 23: irq    nowait 0                   
-    0x000a, // 24: jmp    10                         
+    0xa742, // 10: nop                           [7] 
+    0xf880, // 11: set    pindirs, 0      side 1     
+    0x7a21, // 12: out    x, 1            side 1 [2] 
+    0xf081, // 13: set    pindirs, 1      side 0     
+    0x1232, // 14: jmp    !x, 18          side 0 [2] 
+    0xf880, // 15: set    pindirs, 0      side 1     
+    0x1eeb, // 16: jmp    !osre, 11       side 1 [6] 
+    0x0015, // 17: jmp    21                         
+    0xf081, // 18: set    pindirs, 1      side 0     
+    0x16eb, // 19: jmp    !osre, 11       side 0 [6] 
+    0xf880, // 20: set    pindirs, 0      side 1     
+    0xfa80, // 21: set    pindirs, 0      side 1 [2] 
+    0xf381, // 22: set    pindirs, 1      side 0 [3] 
+    0xfb80, // 23: set    pindirs, 0      side 1 [3] 
+    0x0000, // 24: jmp    0                          
             //     .wrap
 };
 
@@ -65,6 +65,7 @@ static inline pio_sm_config joybus_program_get_default_config(uint offset) {
 static inline void joybus_set_in(bool in, PIO pio, uint sm, uint offset, pio_sm_config *c, uint pin)
 {
     // Disable SM
+    pio_sm_clear_fifos(pio, sm);
     pio_sm_set_enabled(pio, sm, false);
     if (in)
     {

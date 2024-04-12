@@ -11,7 +11,7 @@
 .wrap_target
 ; First lets focus on counting pulses
 PUBLIC joybusin:
-  set pindirs, 0
+  set pindirs, 0 
 bytestart:
   set x, 7 ; Set x scratch register as bit counter to allow 8 loops
 bitloop:
@@ -29,6 +29,7 @@ completed:
   jmp bytestart
 
 PUBLIC joybusout:
+    nop[7]
 output:
     set pindirs, 0 side 1
     out x, 1        side 1 [2] ;Side-set still takes place when instruction stalls
@@ -45,15 +46,16 @@ do_zero:
 do_end:
     set pindirs, 0 side 1 [2]
     set pindirs, 1 side 0 [3]
-    set pindirs, 0 side 1
-    irq nowait 0
-    jmp output
+    set pindirs, 0 side 1 [3]
+    ;irq nowait 0
+    jmp joybusin
 .wrap
 
 % c-sdk {
 static inline void joybus_set_in(bool in, PIO pio, uint sm, uint offset, pio_sm_config *c, uint pin)
 {
     // Disable SM
+    pio_sm_clear_fifos(pio, sm);
     pio_sm_set_enabled(pio, sm, false);
     if (in)
     {
