@@ -81,6 +81,7 @@ volatile uint8_t _dmaOut[4][8];
 
 typedef struct
 {
+  bool connected;
   uint8_t byteCounter; // How many bytes left to read before we must respond
   uint8_t workingCmd;  // The current working command we received
   bool lock; // Lock so it doesn't get interrupted
@@ -217,8 +218,6 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
   return ret;
 }
 
-volatile bool t = false;
-
 static void _gamecube_isr_rxgot(void)
 {
   irq_set_enabled(_gamecube_irq_rx, false);
@@ -228,8 +227,10 @@ static void _gamecube_isr_rxgot(void)
 
     for(uint i = 0; i < JOYBUS_CHANNELS; i++)
     {
-        if(!pio_sm_is_rx_fifo_empty(GAMEPAD_PIO, i))
-        _gamecube_command_handler(i, 0);
+        if(!pio_sm_is_rx_fifo_empty(GAMEPAD_PIO, i) && _joybus_state[i].connected)
+        {
+          _gamecube_command_handler(i, 0);
+        }
     }
     
   }
@@ -257,11 +258,54 @@ static void _gamecube_isr_txdone(void)
   
 }
 
+void gamecube_controller_connect(int idx, bool connected)
+{
+  if(connected && !_joybus_state[idx].connected)
+  {
+    pio_sm_clear_fifos(GAMEPAD_PIO, idx);
+    _joybus_state[idx].connected = true;
+    _joybus_state[idx].byteCounter = BYTECOUNT_DEFAULT;
+    _joybus_state[idx].workingCmd = 0x00;
+    _joybus_state[idx].rumble = false;
+    joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, idx, _gamecube_offset, PIN_JOYBUS_BASE+idx, &(_gamecube_c[idx]));
+  }
+  else if(!connected)
+  {
+    _joybus_state[idx].connected = false;
+  }
+  
+}
+
+#define ANALOG_F_CONST (float) (0.21484375f)
+
+uint8_t _gamecube_analog_helper(int32_t input)
+{
+  float   scaled = input*ANALOG_F_CONST;
+  int     out = scaled+127;
+  uint8_t val = CLAMP_0_255(out);
+  return val;
+}
+
+uint8_t _gamecube_analog_trigger_helper(int32_t input)
+{
+  float   scaled = input*0.499f;
+  int     out = scaled;
+  uint8_t val = CLAMP_0_255(out);
+  return val;
+}
+
 void gamecube_comms_update(int idx, uni_gamepad_t *gp)
 {
   mutex_enter_blocking(&_gamepad_mutex);
-  _incoming_gamepad[0].buttons = gp->buttons;
-  _incoming_gamepad[0].dpad = gp->dpad;
+  _incoming_gamepad[idx].buttons = gp->buttons;
+  _incoming_gamepad[idx].misc_buttons = gp->misc_buttons;
+  _incoming_gamepad[idx].dpad = gp->dpad;
+  _incoming_gamepad[idx].axis_x = gp->axis_x;
+  _incoming_gamepad[idx].axis_y = gp->axis_y;
+  _incoming_gamepad[idx].axis_rx = gp->axis_rx;
+  _incoming_gamepad[idx].axis_ry = gp->axis_ry;
+  _incoming_gamepad[idx].brake = gp->brake;
+  _incoming_gamepad[idx].throttle = gp->throttle;
   _in_buffer_update = true;
   mutex_exit(&_gamepad_mutex);
 }
@@ -270,8 +314,6 @@ interval_s interval[4];
 
 void gamecube_comms_task()
 {
-  
-
   if (!_gc_running)
   {
 
@@ -326,6 +368,7 @@ void gamecube_comms_task()
   }
   else
   {
+    
     uint32_t timestamp = time_us_32();
 
     for(uint i = 0; i < JOYBUS_CHANNELS; i++)
@@ -337,40 +380,67 @@ void gamecube_comms_task()
       if (_gc_got_data[i]) _gc_got_data[i]=false;
     }
 
-      if (_in_buffer_update)
+    if (_in_buffer_update)
+    {
+      if(mutex_enter_timeout_ms(&_gamepad_mutex, 1))
       {
-        if(mutex_enter_timeout_ms(&_gamepad_mutex, 4))
+        for(uint i = 0; i < JOYBUS_CHANNELS; i++)
         {
-          _out_buffer[0].blank_2 = 1;
-          _out_buffer[0].button_a        = (_incoming_gamepad[0].buttons & BUTTON_A) ? true : false;
-          _out_buffer[0].button_b        = (_incoming_gamepad[0].buttons & BUTTON_B) ? true : false;
-          _out_buffer[0].button_x        = (_incoming_gamepad[0].buttons & BUTTON_X) ? true : false;
-          _out_buffer[0].button_y        = (_incoming_gamepad[0].buttons & BUTTON_Y) ? true : false;
-          _out_buffer[0].button_start    = (_incoming_gamepad[0].misc_buttons & MISC_BUTTON_HOME) ? true : false;
+          _out_buffer[i].blank_2 = 1;
+          _out_buffer[i].button_a        = (_incoming_gamepad[i].buttons & BUTTON_A) ? true : false;
+          _out_buffer[i].button_b        = (_incoming_gamepad[i].buttons & BUTTON_B) ? true : false;
+          _out_buffer[i].button_x        = (_incoming_gamepad[i].buttons & BUTTON_X) ? true : false;
+          _out_buffer[i].button_y        = (_incoming_gamepad[i].buttons & BUTTON_Y) ? true : false;
 
-          //_out_buffer.button_l = buttons->trigger_zl;
-          //_out_buffer.button_r = buttons->trigger_zr;
+          _out_buffer[i].button_start    = (_incoming_gamepad[i].misc_buttons & MISC_BUTTON_START) ? true : false;
+          _out_buffer[i].button_start    |= (_incoming_gamepad[i].misc_buttons & MISC_BUTTON_SYSTEM) ? true : false;
 
-          //float lx = (analog->lx * 0.0488f) + 28;
-          //float ly = (analog->ly * 0.0488f) + 28;
-          //float rx = (analog->rx * 0.0488f) + 28;
-          //float ry = (analog->ry * 0.0488f) + 28;
+          _out_buffer[i].button_z = (_incoming_gamepad[i].buttons & BUTTON_SHOULDER_R) ? true : false;
 
-          _out_buffer[0].stick_left_x = 127;//CLAMP_0_255(lx);
-          _out_buffer[0].stick_left_y = 127;//CLAMP_0_255(ly);
-          _out_buffer[0].stick_right_x = 127;//CLAMP_0_255(rx);
-          _out_buffer[0].stick_right_y = 127;//CLAMP_0_255(ry);
+          _out_buffer[i].stick_left_x = _gamecube_analog_helper(_incoming_gamepad[i].axis_x);
+          _out_buffer[i].stick_left_y = _gamecube_analog_helper(-_incoming_gamepad[i].axis_y);
+          _out_buffer[i].stick_right_x = _gamecube_analog_helper(_incoming_gamepad[i].axis_rx);
+          _out_buffer[i].stick_right_y = _gamecube_analog_helper(-_incoming_gamepad[i].axis_ry);
 
-          _out_buffer[0].dpad_down     = (_incoming_gamepad[0].dpad & DPAD_DOWN) ? true : false;
-          _out_buffer[0].dpad_left     = (_incoming_gamepad[0].dpad & DPAD_LEFT) ? true : false;
-          _out_buffer[0].dpad_right    = (_incoming_gamepad[0].dpad & DPAD_RIGHT) ? true : false;
-          _out_buffer[0].dpad_up       = (_incoming_gamepad[0].dpad & DPAD_UP) ? true : false;
+          _out_buffer[i].dpad_down     = (_incoming_gamepad[i].dpad & DPAD_DOWN) ? true : false;
+          _out_buffer[i].dpad_left     = (_incoming_gamepad[i].dpad & DPAD_LEFT) ? true : false;
+          _out_buffer[i].dpad_right    = (_incoming_gamepad[i].dpad & DPAD_RIGHT) ? true : false;
+          _out_buffer[i].dpad_up       = (_incoming_gamepad[i].dpad & DPAD_UP) ? true : false;
 
-          int outl = 0;
-          int outr = 0;
-          _in_buffer_update = false;
-          mutex_exit(&_gamepad_mutex);
+          uint8_t al = _gamecube_analog_trigger_helper(_incoming_gamepad[i].brake);
+          uint8_t ar = _gamecube_analog_trigger_helper(_incoming_gamepad[i].throttle);
+
+          bool alb = (_incoming_gamepad[i].buttons & BUTTON_TRIGGER_L) ? true : false;
+          bool arb = (_incoming_gamepad[i].buttons & BUTTON_TRIGGER_R) ? true : false;
+
+          if(al>220)
+          {
+            alb = true;
+          }
+          else if (al>0)
+          {
+            alb = false;
+          }
+
+          if(ar>220)
+          {
+            arb = true;
+          }
+          else if (ar>0)
+          {
+            arb = false;
+          }
+
+          _out_buffer[i].analog_trigger_l = al;
+          _out_buffer[i].analog_trigger_r = ar;
+          _out_buffer[i].button_l = alb;
+          _out_buffer[i].button_r = arb;
+
         }
+        _in_buffer_update = false;
+        mutex_exit(&_gamepad_mutex);
       }
+    }
+
   }
 }

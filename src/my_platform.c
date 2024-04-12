@@ -29,22 +29,11 @@ static void my_platform_init(int argc, const char** argv) {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
     logi("my_platform: init()\n");
 
-#if 0
     uni_gamepad_mappings_t mappings = GAMEPAD_DEFAULT_MAPPINGS;
-
-    // Inverted axis with inverted Y in RY.
-    mappings.axis_x = UNI_GAMEPAD_MAPPINGS_AXIS_RX;
-    mappings.axis_y = UNI_GAMEPAD_MAPPINGS_AXIS_RY;
-    mappings.axis_ry_inverted = true;
-    mappings.axis_rx = UNI_GAMEPAD_MAPPINGS_AXIS_X;
-    mappings.axis_ry = UNI_GAMEPAD_MAPPINGS_AXIS_Y;
-
     // Invert A & B
     mappings.button_a = UNI_GAMEPAD_MAPPINGS_BUTTON_B;
     mappings.button_b = UNI_GAMEPAD_MAPPINGS_BUTTON_A;
-
     uni_gamepad_set_mappings(&mappings);
-#endif
 }
 
 static void my_platform_on_init_complete(void) {
@@ -71,9 +60,13 @@ static void my_platform_on_init_complete(void) {
 
 static void my_platform_on_device_connected(uni_hid_device_t* d) {
     logi("my_platform: device connected: %p\n", d);
+    uint8_t idx = uni_hid_device_get_idx_for_instance(d);
+    gamecube_controller_connect(idx, true);
 }
 
 static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
+    uint8_t idx = uni_hid_device_get_idx_for_instance(d);
+    gamecube_controller_connect(idx, false);
     logi("my_platform: device disconnected: %p\n", d);
 }
 
@@ -187,24 +180,6 @@ static void trigger_event_on_gamepad(uni_hid_device_t* d) {
     if (d->report_parser.play_dual_rumble != NULL) {
         d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 50 /* duration ms */, 128 /* weak magnitude */,
                                           40 /* strong magnitude */);
-    }
-
-    if (d->report_parser.set_player_leds != NULL) {
-        static uint8_t led = 0;
-        led += 1;
-        led &= 0xf;
-        d->report_parser.set_player_leds(d, led);
-    }
-
-    if (d->report_parser.set_lightbar_color != NULL) {
-        static uint8_t red = 0x10;
-        static uint8_t green = 0x20;
-        static uint8_t blue = 0x40;
-
-        red += 0x10;
-        green -= 0x20;
-        blue += 0x40;
-        d->report_parser.set_lightbar_color(d, red, green, blue);
     }
 }
 
