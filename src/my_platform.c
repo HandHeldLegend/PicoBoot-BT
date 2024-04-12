@@ -33,6 +33,8 @@ static void my_platform_init(int argc, const char** argv) {
     // Invert A & B
     mappings.button_a = UNI_GAMEPAD_MAPPINGS_BUTTON_B;
     mappings.button_b = UNI_GAMEPAD_MAPPINGS_BUTTON_A;
+    mappings.button_x = UNI_GAMEPAD_MAPPINGS_BUTTON_Y;
+    mappings.button_y = UNI_GAMEPAD_MAPPINGS_BUTTON_X;
     uni_gamepad_set_mappings(&mappings);
 }
 
@@ -59,7 +61,7 @@ static void my_platform_on_init_complete(void) {
 }
 
 static void my_platform_on_device_connected(uni_hid_device_t* d) {
-    logi("my_platform: device connected: %p\n", d);
+    //logi("my_platform: device connected: %p\n", d);
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
     gamecube_controller_connect(idx, true);
 }
@@ -67,14 +69,21 @@ static void my_platform_on_device_connected(uni_hid_device_t* d) {
 static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
     gamecube_controller_connect(idx, false);
-    logi("my_platform: device disconnected: %p\n", d);
+    //logi("my_platform: device disconnected: %p\n", d);
 }
 
 static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
-    logi("my_platform: device ready: %p\n", d);
+    //logi("my_platform: device ready: %p\n", d);
 
     // You can reject the connection by returning an error.
     return UNI_ERROR_SUCCESS;
+}
+
+volatile bool _should_rumble[4];
+
+void my_platform_set_rumble(uint8_t idx, bool rumble)
+{
+    _should_rumble[idx] = rumble;
 }
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
@@ -83,18 +92,51 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     static uni_controller_t prev = {0};
     uni_gamepad_t* gp;
 
-    if (memcmp(&prev, ctl, sizeof(*ctl)) == 0) {
-        return;
-    }
-    prev = *ctl;
+    //if (memcmp(&prev, ctl, sizeof(*ctl)) == 0) {
+    //    return;
+    //}
+    //prev = *ctl;
+
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
+
+    if(_should_rumble[idx])
+    {
+        d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 100 /* duration ms */, 128 /* weak magnitude */,
+                                          40 /* strong magnitude */);
+    }
+    else
+    {
+        d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 0 /* duration ms */, 0 /* weak magnitude */,
+                                          0 /* strong magnitude */);
+    }
     // Print device Id before dumping gamepad.
-    logi("(%p) id=%d ", d, idx);
+    //logi("(%p) id=%d ", d, idx);
     //uni_controller_dump(ctl);
 
     switch (ctl->klass) {
         case UNI_CONTROLLER_CLASS_GAMEPAD:
             gp = &ctl->gamepad;
+
+            bool a = gp->buttons & BUTTON_A;
+            bool b = gp->buttons & BUTTON_B;
+            bool x = gp->buttons & BUTTON_X;
+            bool y = gp->buttons & BUTTON_Y;
+
+            switch(d->controller_type)
+            {
+                default:
+                break;
+                
+                case k_eControllerType_XBox360Controller:
+                case k_eControllerType_XBoxOneController:
+                #define BUTTON_SUBTRACT_MASK ~(BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_Y)
+                gp->buttons &= 0b11110000;
+                gp->buttons |= (a) ? BUTTON_B : 0;
+                gp->buttons |= (b) ? BUTTON_A : 0;
+                gp->buttons |= (x) ? BUTTON_Y : 0;
+                gp->buttons |= (y) ? BUTTON_X : 0;
+                break;
+            }
 
             gamecube_comms_update(idx, gp);
 
@@ -156,6 +198,8 @@ static const uni_property_t* my_platform_get_property(uni_property_idx_t idx) {
 }
 
 static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data) {
+    return;
+    
     switch (event) {
         case UNI_PLATFORM_OOB_GAMEPAD_SYSTEM_BUTTON:
             // Optional: do something when "system" button gets pressed.
@@ -165,11 +209,12 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
         case UNI_PLATFORM_OOB_BLUETOOTH_ENABLED:
             // When the "bt scanning" is on / off. Could be triggered by different events
             // Useful to notify the user
-            logi("my_platform_on_oob_event: Bluetooth enabled: %d\n", (bool)(data));
+            //logi("my_platform_on_oob_event: Bluetooth enabled: %d\n", (bool)(data));
             break;
 
         default:
-            logi("my_platform_on_oob_event: unsupported event: 0x%04x\n", event);
+            //logi("my_platform_on_oob_event: unsupported event: 0x%04x\n", event);
+            break;
     }
 }
 
