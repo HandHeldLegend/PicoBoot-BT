@@ -73,7 +73,7 @@ volatile uint32_t time;
 uint32_t gamecube_get_timestamp()
 {
   uint32_t ret = time;
-  mutex_enter_timeout_ms(&timestamp_mutex, 1);
+  mutex_enter_timeout_us(&timestamp_mutex, 100);
   time = time_us_32();
   ret = time;
   mutex_exit(&timestamp_mutex);

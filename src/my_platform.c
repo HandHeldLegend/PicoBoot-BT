@@ -64,15 +64,21 @@ static void my_platform_on_init_complete(void) {
     uni_property_dump_all();
 }
 
+bool _is_connected[4];
+bool _keep_alive[4];
+
 static void my_platform_on_device_connected(uni_hid_device_t* d) {
     //logi("my_platform: device connected: %p\n", d);
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
     _d[idx] = d;
+    _is_connected[idx] = true;
+    _keep_alive[idx] = true;
     gamecube_controller_connect(idx, true);
 }
 
 static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
+    _is_connected[idx] = false;
     gamecube_controller_connect(idx, false);
     //logi("my_platform: device disconnected: %p\n", d);
 }
@@ -86,16 +92,39 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
 
 volatile bool _should_rumble[4];
 bool _is_rumbling[4];
+interval_s rumbleinterval[4];
+interval_s keepaliveinterval[4];
+
 
 auto_init_mutex(rumble_mutex);
 
 void my_platform_set_rumble(uint8_t idx, bool rumble)
 {
+    if(!_is_connected[idx]) return;
+
+    uint32_t timestamp = gamecube_get_timestamp();
+
     if(rumble)
     {
-        _d[idx]->report_parser.play_dual_rumble(_d[idx], 0 /* delayed start ms */, 32 /* duration ms */, 128 /* weak magnitude */,
+        if(!_is_rumbling[idx])
+        {
+            _d[idx]->report_parser.play_dual_rumble(_d[idx], 0 /* delayed start ms */, 32 /* duration ms */, 128 /* weak magnitude */,
                                                 40 /* strong magnitude */);
+            interval_resettable_run(timestamp, 32000, true, &(rumbleinterval[idx]));
+            _is_rumbling[idx] = true;
+        }
+        else
+        {
+            if(interval_resettable_run(timestamp, 32000, false, &(rumbleinterval[idx])))
+            {
+                _d[idx]->report_parser.play_dual_rumble(_d[idx], 0 /* delayed start ms */, 32 /* duration ms */, 128 /* weak magnitude */,
+                                                40 /* strong magnitude */);
+            }
+        }
     }
+    else _is_rumbling[idx] = false;
+
+
 }
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
@@ -110,7 +139,7 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     //}
     //prev = *ctl;
 
-    static interval_s rumbleinterval[4];
+    
 
     // Print device Id before dumping gamepad.
     //logi("(%p) id=%d ", d, idx);
@@ -119,7 +148,8 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     switch (ctl->klass) {
         case UNI_CONTROLLER_CLASS_GAMEPAD:
             idx = uni_hid_device_get_idx_for_instance(d);
-            uint32_t timestamp = gamecube_get_timestamp();
+            
+            _keep_alive[idx] = true;
 
             gp = &ctl->gamepad;
 
