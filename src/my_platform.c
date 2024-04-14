@@ -7,8 +7,10 @@
 #include <pico/cyw43_arch.h>
 #include <pico/time.h>
 #include <uni.h>
+#include <pico/multicore.h>
 
 #include "gamecube.h"
+#include "types.h"
 
 #include "sdkconfig.h"
 
@@ -16,6 +18,8 @@
 #ifndef CONFIG_BLUEPAD32_PLATFORM_CUSTOM
 #error "Pico W must use BLUEPAD32_PLATFORM_CUSTOM"
 #endif
+
+uni_hid_device_t *_d[4];
 
 // Declarations
 static void trigger_event_on_gamepad(uni_hid_device_t* d);
@@ -63,6 +67,7 @@ static void my_platform_on_init_complete(void) {
 static void my_platform_on_device_connected(uni_hid_device_t* d) {
     //logi("my_platform: device connected: %p\n", d);
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
+    _d[idx] = d;
     gamecube_controller_connect(idx, true);
 }
 
@@ -80,10 +85,17 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
 }
 
 volatile bool _should_rumble[4];
+bool _is_rumbling[4];
+
+auto_init_mutex(rumble_mutex);
 
 void my_platform_set_rumble(uint8_t idx, bool rumble)
 {
-    _should_rumble[idx] = rumble;
+    if(rumble)
+    {
+        _d[idx]->report_parser.play_dual_rumble(_d[idx], 0 /* delayed start ms */, 32 /* duration ms */, 128 /* weak magnitude */,
+                                                40 /* strong magnitude */);
+    }
 }
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
@@ -91,30 +103,24 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     static uint8_t enabled = true;
     static uni_controller_t prev = {0};
     uni_gamepad_t* gp;
+    uint8_t idx = 0;
 
     //if (memcmp(&prev, ctl, sizeof(*ctl)) == 0) {
     //    return;
     //}
     //prev = *ctl;
 
-    uint8_t idx = uni_hid_device_get_idx_for_instance(d);
+    static interval_s rumbleinterval[4];
 
-    if(_should_rumble[idx])
-    {
-        d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 100 /* duration ms */, 128 /* weak magnitude */,
-                                          40 /* strong magnitude */);
-    }
-    else
-    {
-        d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 0 /* duration ms */, 0 /* weak magnitude */,
-                                          0 /* strong magnitude */);
-    }
     // Print device Id before dumping gamepad.
     //logi("(%p) id=%d ", d, idx);
     //uni_controller_dump(ctl);
 
     switch (ctl->klass) {
         case UNI_CONTROLLER_CLASS_GAMEPAD:
+            idx = uni_hid_device_get_idx_for_instance(d);
+            uint32_t timestamp = gamecube_get_timestamp();
+
             gp = &ctl->gamepad;
 
             bool a = gp->buttons & BUTTON_A;

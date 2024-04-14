@@ -2,7 +2,6 @@
 #include <stdbool.h>
 #include "gamecube.h"
 #include <hardware/pio.h>
-#include "types.h"
 #include <pico/multicore.h>
 #include "hardware/dma.h"
 #include <pico/cyw43_arch.h>
@@ -27,7 +26,60 @@
 
 #define JOYBUS_CHANNELS 4
 
+typedef struct
+{
+    union
+    {
+        struct
+        {
+            uint8_t button_a : 1;
+            uint8_t button_b : 1;
+            uint8_t button_x : 1;
+            uint8_t button_y : 1;
+            uint8_t button_start : 1;
+            uint8_t blank_1 : 3;
+        };
+        uint8_t buttons_1;
+    };
+
+    union
+    {
+        struct
+        {
+            uint8_t dpad_left   : 1;
+            uint8_t dpad_right  : 1;
+            uint8_t dpad_down   : 1;
+            uint8_t dpad_up     : 1;
+            uint8_t button_z    : 1;
+            uint8_t button_r    : 1;
+            uint8_t button_l    : 1;
+            uint8_t blank_2     : 1;
+        };
+        uint8_t buttons_2;
+    };
+
+    uint8_t stick_left_x;
+    uint8_t stick_left_y;
+    uint8_t stick_right_x;
+    uint8_t stick_right_y;
+    uint8_t analog_trigger_l;
+    uint8_t analog_trigger_r;
+} __attribute__ ((packed)) gamecube_input_s;
+
 const uint joybus_pins[4] = PINS_JOYBUS;
+
+mutex_t timestamp_mutex;
+volatile uint32_t time;
+uint32_t gamecube_get_timestamp()
+{
+  uint32_t ret = time;
+  mutex_enter_timeout_ms(&timestamp_mutex, 1);
+  time = time_us_32();
+  ret = time;
+  mutex_exit(&timestamp_mutex);
+
+  return ret;
+}
 
 // This is a function that will return
 // offers the ability to restart the timer
@@ -74,8 +126,6 @@ pio_sm_config _gamecube_c[4];
 
 volatile bool _gc_got_data[4];
 volatile bool _gc_running = false;
-bool _gc_rumble = false;
-
 
 volatile gamecube_input_s _in_buffer[4] = {0};
 volatile gamecube_input_s _out_buffer[4] = {0};
@@ -107,23 +157,26 @@ mutex_t _gamepad_mutex[4];
 
 volatile uint8_t _cannedProbe[3] = {0x09, 0x00, 0x03};
 volatile uint8_t _cannedProbeTX[4][3];
-volatile uint8_t _cannedOrigin[10] = {0x00, 128, 128, 128, 128, 128, 0x00, 0x00, 0x00, 0x00};
+volatile uint8_t _cannedOrigin[10] = {0x00, 128, 128, 128, 128, 128, 0x00, 0x00, 0x02, 0x02};
 volatile uint8_t _cannedOriginTX[4][10];
 
 void _gamecube_send_probe(uint sm)
 {
+  pio_sm_clear_fifos(GAMEPAD_PIO, sm);
   dma_channel_set_trans_count(_joybus_state[sm].dma, 3, false);
   dma_channel_set_read_addr(_joybus_state[sm].dma, &(_cannedProbeTX[sm]), true);
 }
 
 void _gamecube_send_origin(uint sm)
 {
+  pio_sm_clear_fifos(GAMEPAD_PIO, sm);
   dma_channel_set_trans_count(_joybus_state[sm].dma, 10, false);
   dma_channel_set_read_addr(_joybus_state[sm].dma, &(_cannedOriginTX[sm]), true);
 }
 
 void _gamecube_send_poll(uint sm)
 {
+  pio_sm_clear_fifos(GAMEPAD_PIO, sm);
   dma_channel_set_trans_count(_joybus_state[sm].dma, 8, false);
   dma_channel_set_read_addr(_joybus_state[sm].dma, &(_out_buffer[sm]), true);
 }
@@ -167,6 +220,8 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
       pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
       _gamecube_send_origin(sm);
       pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), true);
+
+      ret = true;
     }
   break;
 
@@ -175,7 +230,7 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
 
     if (_joybus_state[sm].byteCounter == 0)
     {
-      _joybus_state[sm].rumble = ((dat & 0x1) > 0) ? true : false;
+      _joybus_state[sm].rumble = (dat & 0x1) ? true : false;
 
       _gc_got_data[sm] = true;
       _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
@@ -194,6 +249,7 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
   case 0x00:
     _gc_got_data[sm] = true;
     _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+
     joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), joybus_pins[sm]);
     pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
     _gamecube_send_probe(sm);
@@ -322,7 +378,7 @@ void gamecube_comms_task()
 {
   if (!_gc_running)
   {
-
+    mutex_init(&timestamp_mutex);
     for(uint i = 0; i < 4; i++)
     {
       mutex_init(&(_gamepad_mutex[i]));
@@ -376,7 +432,7 @@ void gamecube_comms_task()
   else
   {
     
-    uint32_t timestamp = time_us_32();
+    uint32_t timestamp = gamecube_get_timestamp();
 
     for(uint i = 0; i < JOYBUS_CHANNELS; i++)
     {
@@ -385,9 +441,9 @@ void gamecube_comms_task()
         _gamecube_reset_state(i);
       }
       if (_gc_got_data[i]) _gc_got_data[i]=false;
+      
     }
     
-
     for(uint i = 0; i < JOYBUS_CHANNELS; i++)
     {
       my_platform_set_rumble(i, _joybus_state[i].rumble);
@@ -396,6 +452,8 @@ void gamecube_comms_task()
       {
         if(mutex_enter_timeout_ms(&(_gamepad_mutex[i]), 1))
         {
+          
+
           _out_buffer[i].blank_2 = 1;
           _out_buffer[i].button_a        = (_incoming_gamepad[i].buttons & BUTTON_A) ? true : false;
           _out_buffer[i].button_b        = (_incoming_gamepad[i].buttons & BUTTON_B) ? true : false;
