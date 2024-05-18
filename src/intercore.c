@@ -3,12 +3,12 @@
 auto_init_mutex(intercore_core0_mutex);
 auto_init_mutex(intercore_core1_mutex);
 
-#define INTERCORE_QUEUE_LEN 16
+#define INTERCORE_QUEUE_LEN 32
 
-volatile intercore_msg_s _core0_queue[16];
+volatile intercore_msg_s _core0_queue[INTERCORE_QUEUE_LEN];
 volatile uint8_t _core0_write_idx = 0;
 
-volatile intercore_msg_s _core1_queue[16];
+volatile intercore_msg_s _core1_queue[INTERCORE_QUEUE_LEN];
 volatile uint8_t _core1_write_idx = 0;
 
 void core0_send_message_safe(intercore_msg_s *in)
@@ -85,11 +85,17 @@ void core1_send_message_safe(intercore_msg_s *in)
     // to the last written
     if(_core1_queue[_core1_write_idx].msg != in->msg)
     {
-        _core1_queue[_core1_write_idx].msg = in->msg;
-        _core1_queue[_core1_write_idx].ready = true;
-        _core1_write_idx = (_core1_write_idx+1) % INTERCORE_QUEUE_LEN;
+        for(uint i = 0; i < INTERCORE_QUEUE_LEN; i++)
+        {
+            if(!_core1_queue[i].ready)
+            {
+                _core1_queue[i].msg = in->msg;
+                _core1_queue[i].ready = true;
+                mutex_exit(&intercore_core1_mutex);
+                return;
+            }
+        }
     }
-
     mutex_exit(&intercore_core1_mutex);
 }
 

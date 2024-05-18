@@ -599,24 +599,32 @@ void gamecube_comms_task()
         break;
       }
     }
-  
-    // Rumble handling to core 1
+
+    // Call our hook safely (16ms spacing)
     {
-      // Use 4 bits to signal rumble in one message
-      static uint8_t currentrumblestate = 0b0000;
+      static interval_s safe_interval = {0};
       static uint8_t newrumblestate = 0b0000;
 
-      newrumblestate = (_joybus_state[0].rumble<<3) | (_joybus_state[1].rumble<<2) | (_joybus_state[2].rumble<<1) | (_joybus_state[3].rumble);
-      static intercore_msg_s core1outmsg = {0};
+      newrumblestate |= (_joybus_state[0].rumble<<3) | (_joybus_state[1].rumble<<2) | (_joybus_state[2].rumble<<1) | (_joybus_state[3].rumble);
 
-      if(currentrumblestate != newrumblestate)
+      if(interval_run(timestamp, 16000, &safe_interval))
       {
+        static intercore_msg_s core1outmsg = {0};
+        static uint8_t currentrumble = 0;
+        
         core1outmsg.id = IC_MSG_RUMBLE;
-        core1outmsg.data = newrumblestate;
-        currentrumblestate = newrumblestate;
-        core1_send_message_safe(&core1outmsg);
-      }
 
+        if(currentrumble != newrumblestate)
+        {
+          core1outmsg.data = newrumblestate;
+          core1_send_message_safe(&core1outmsg);
+          currentrumble = newrumblestate;
+          
+        }
+        newrumblestate = 0;
+        
+        uni_run_platform_hook_safe();
+      }
     }
 
   }

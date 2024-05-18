@@ -27,8 +27,6 @@ typedef struct
     interval_s timeout_interval;
     bool connected;
     bool led_set;
-    bool rumble;
-    interval_s rumble_interval;
     uni_hid_device_t *device_ptr;
 } my_playform_player_s;
 
@@ -85,7 +83,6 @@ static void my_platform_on_device_connected(uni_hid_device_t* d) {
         case 0 ... 3:
             _players[idx].connected = true;
             _players[idx].device_ptr = d;
-            _players[idx].rumble = false;
             _players[idx].led_set = false;
             core1playermsg.data = idx;
             core0_send_message_safe(&core1playermsg);
@@ -108,7 +105,6 @@ static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
             core1playermsg.data = idx;
             core0_send_message_safe(&core1playermsg);
             _players[idx].connected = false;
-            _players[idx].rumble = false;
         break;
 
         default:
@@ -124,21 +120,16 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
     return UNI_ERROR_SUCCESS;
 }
 
-void _my_platform_process_rumble(uint32_t timestamp, uint8_t idx)
+void _my_platform_process_rumble(uint8_t idx, bool rumble)
 {
-    if(!_players[idx].connected) return;
-
-    interval_s *r = &(_players[idx].rumble_interval);
-    bool state = _players[idx].rumble;
+    bool state = rumble;
     uni_hid_device_t *d = _players[idx].device_ptr;
+    if(!_players[idx].connected | d->report_parser.play_dual_rumble == NULL) return;
 
-    if(interval_run(timestamp, 64000, r))
-    {
-        if(state)
-        d->report_parser.play_dual_rumble(d, 0, 128, 128, 40);
-        else
-        d->report_parser.play_dual_rumble(d, 0, 0, 0, 0);
-    }
+    if(state)
+    d->report_parser.play_dual_rumble(d, 0, 32, 128, 40);
+    else
+    d->report_parser.play_dual_rumble(d, 0, 0, 0, 0);
 }
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
@@ -149,52 +140,12 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     if(!_players[idx].led_set && (d->report_parser.set_player_leds!=NULL))
     {
         // Set player LEDs
-        d->report_parser.set_player_leds(d, ((1<<idx)&0xF));
-        _players[idx].led_set = true;
-    }
-
-    // Since this is the only real loop where we can hook into where we have guaranteed data
-    // we receive our intercore messages here
-    bool get = false;
-    static uint hook_idx = 0;
-
-    // Get the first connected player
-    // and use them as our hook point
-    for(uint i = 0; i < 4; i++)
-    {
-        if(_players[i].connected) 
+        if(d->report_parser.set_player_leds != NULL)
         {
-            hook_idx = i;
-            get = true;
-            break;
+            d->report_parser.set_player_leds(d, ((1<<idx)&0xF));
+            _players[idx].led_set = true;
         }
-    }
-
-    // Only get core1 message for first connected player
-    if(idx==hook_idx && get)
-    {
-        static intercore_msg_s core1msg = {0};
-        uint32_t timestamp = gamecube_get_timestamp();
-        if(core1_get_message_safe(&core1msg))
-        {
-            switch(core1msg.id)
-            {
-                default:
-                break;
-
-                case IC_MSG_RUMBLE:
-                    _players[0].rumble = core1msg.data & 0b1000;
-                    _players[1].rumble = core1msg.data & 0b100;
-                    _players[2].rumble = core1msg.data & 0b10;
-                    _players[3].rumble = core1msg.data & 0b1;
-
-                    _my_platform_process_rumble(timestamp, 0);
-                    _my_platform_process_rumble(timestamp, 1);
-                    _my_platform_process_rumble(timestamp, 2);
-                    _my_platform_process_rumble(timestamp, 3);
-                break;
-            }
-        }
+        
     }
 
     // Send input message if it's a gamepad of valid type
@@ -286,6 +237,31 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
     }
 }
 
+static void my_platform_bt_loop_hook()
+{
+    static intercore_msg_s core1msg = {0};
+    static uint8_t _rumble_status = 0;
+
+    if(core1_get_message_safe(&core1msg))
+    {
+        switch(core1msg.id)
+        {
+            default:
+            break;
+
+            case IC_MSG_RUMBLE:
+                _rumble_status = core1msg.data & 0b1111;
+            break;
+        }
+    }
+
+    _my_platform_process_rumble(0, (_rumble_status & 0b1000));
+    _my_platform_process_rumble(1, (_rumble_status & 0b100));
+    _my_platform_process_rumble(2, (_rumble_status & 0b10));
+    _my_platform_process_rumble(3, (_rumble_status & 0b1));
+
+}
+
 //
 // Entry Point
 //
@@ -300,6 +276,7 @@ struct uni_platform* get_my_platform(void) {
         .on_oob_event = my_platform_on_oob_event,
         .on_controller_data = my_platform_on_controller_data,
         .get_property = my_platform_get_property,
+        .safe_platform_hook = my_platform_bt_loop_hook
     };
 
     return &plat;
