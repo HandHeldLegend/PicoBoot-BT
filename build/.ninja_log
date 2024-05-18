@@ -925,3 +925,7 @@
 511	1108	7376924365513242	picoblue.elf	49caf31e650f3c48
 57	391	7376927675525517	CMakeFiles/picoblue.dir/src/my_platform.c.obj	58ff5fa422c1408e
 392	982	7376927678566067	picoblue.elf	49caf31e650f3c48
+50	70	7376941527425113	picoboot.pio.h	ba319349df7f56bd
+50	70	7376941527425113	C:/Users/Mitch/GitRepos/PicoBoot-BT/build/picoboot.pio.h	ba319349df7f56bd
+70	583	7376941532536473	CMakeFiles/picoblue.dir/src/main.c.obj	1c315179466970ab
+583	1185	7376941535734932	picoblue.elf	49caf31e650f3c48
