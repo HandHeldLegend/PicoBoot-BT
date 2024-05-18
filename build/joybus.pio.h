@@ -13,7 +13,7 @@
 // ------ //
 
 #define joybus_wrap_target 0
-#define joybus_wrap 24
+#define joybus_wrap 25
 
 #define joybus_offset_joybusin 0u
 #define joybus_offset_joybusout 10u
@@ -31,27 +31,28 @@ static const uint16_t joybus_program_instructions[] = {
     0xb842, //  8: nop                    side 1     
     0x0001, //  9: jmp    1                          
     0xa742, // 10: nop                           [7] 
-    0xf880, // 11: set    pindirs, 0      side 1     
-    0x7a21, // 12: out    x, 1            side 1 [2] 
-    0xf081, // 13: set    pindirs, 1      side 0     
-    0x1232, // 14: jmp    !x, 18          side 0 [2] 
-    0xf880, // 15: set    pindirs, 0      side 1     
-    0x1eeb, // 16: jmp    !osre, 11       side 1 [6] 
-    0x0015, // 17: jmp    21                         
-    0xf081, // 18: set    pindirs, 1      side 0     
-    0x16eb, // 19: jmp    !osre, 11       side 0 [6] 
-    0xf880, // 20: set    pindirs, 0      side 1     
-    0xfa80, // 21: set    pindirs, 0      side 1 [2] 
-    0xf381, // 22: set    pindirs, 1      side 0 [3] 
-    0xfb80, // 23: set    pindirs, 0      side 1 [3] 
-    0x0000, // 24: jmp    0                          
+    0xa742, // 11: nop                           [7] 
+    0xf880, // 12: set    pindirs, 0      side 1     
+    0x7a21, // 13: out    x, 1            side 1 [2] 
+    0xf081, // 14: set    pindirs, 1      side 0     
+    0x1233, // 15: jmp    !x, 19          side 0 [2] 
+    0xf880, // 16: set    pindirs, 0      side 1     
+    0x1eec, // 17: jmp    !osre, 12       side 1 [6] 
+    0x0016, // 18: jmp    22                         
+    0xf081, // 19: set    pindirs, 1      side 0     
+    0x16ec, // 20: jmp    !osre, 12       side 0 [6] 
+    0xf880, // 21: set    pindirs, 0      side 1     
+    0xfa80, // 22: set    pindirs, 0      side 1 [2] 
+    0xf381, // 23: set    pindirs, 1      side 0 [3] 
+    0xfb80, // 24: set    pindirs, 0      side 1 [3] 
+    0x0000, // 25: jmp    0                          
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program joybus_program = {
     .instructions = joybus_program_instructions,
-    .length = 25,
+    .length = 26,
     .origin = -1,
 };
 

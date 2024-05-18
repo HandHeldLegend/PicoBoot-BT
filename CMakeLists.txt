@@ -17,6 +17,7 @@ set(BLUEPAD32_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/bluepad32)
 #set(BTSTACK_ROOT ${PICO_SDK_PATH}/lib/btstack)
 # To use it from Bluepad32 (up-to-date, with custom patches for controllers):
 set(BTSTACK_ROOT ${BLUEPAD32_ROOT}/external/btstack)
+set(PICO_BTSTACK_PATH ${BTSTACK_ROOT})
 
 project(picoblue C CXX ASM)
 set(CMAKE_C_STANDARD 11)
@@ -29,6 +30,7 @@ add_executable(picoblue
     src/main.c
     src/my_platform.c
     src/gamecube.c
+    src/intercore.c
 )
 
 pico_generate_pio_header(${PROJECT_NAME}   
@@ -47,6 +49,10 @@ target_include_directories(picoblue PRIVATE
 # Needed for btstack_config.h / sdkconfig.h
 # so that libbluepad32 can include them
 include_directories(picoblue src)
+
+# Needed when using BTstack from our branch
+include_directories(${BTSTACK_ROOT}/3rd-party/bluedroid/encoder/include)
+include_directories(${BTSTACK_ROOT}/3rd-party/bluedroid/decoder/include)
 
 target_link_libraries(picoblue
     pico_stdlib

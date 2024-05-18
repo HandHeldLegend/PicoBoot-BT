@@ -13,17 +13,28 @@
 #include "types.h"
 
 #include "sdkconfig.h"
+#include "intercore.h"
 
 // Sanity check
 #ifndef CONFIG_BLUEPAD32_PLATFORM_CUSTOM
 #error "Pico W must use BLUEPAD32_PLATFORM_CUSTOM"
 #endif
 
-uni_hid_device_t *_d[4];
+typedef struct
+{
+    // Set this to keep a controller connection alive
+    bool keep_alive;
+    interval_s timeout_interval;
+    bool connected;
+    bool led_set;
+    bool rumble;
+    interval_s rumble_interval;
+    uni_hid_device_t *device_ptr;
+} my_playform_player_s;
 
-// Declarations
-static void trigger_event_on_gamepad(uni_hid_device_t* d);
+my_playform_player_s _players[4] = {0};
 
+// MY_PLATFORM.C FUNCTIONS RUN ON CORE 1
 //
 // Platform Overrides
 //
@@ -64,23 +75,46 @@ static void my_platform_on_init_complete(void) {
     uni_property_dump_all();
 }
 
-bool _is_connected[4];
-bool _keep_alive[4];
-
 static void my_platform_on_device_connected(uni_hid_device_t* d) {
     //logi("my_platform: device connected: %p\n", d);
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
-    _d[idx] = d;
-    _is_connected[idx] = true;
-    _keep_alive[idx] = true;
-    gamecube_controller_connect(idx, true);
+    static intercore_msg_s core1playermsg = {.id = IC_MSG_CONNECT};
+    
+    switch(idx)
+    {
+        case 0 ... 3:
+            _players[idx].connected = true;
+            _players[idx].device_ptr = d;
+            _players[idx].rumble = false;
+            _players[idx].led_set = false;
+            core1playermsg.data = idx;
+            core0_send_message_safe(&core1playermsg);
+        break;
+
+        default:
+        // Do nothing for other cases
+        break;
+    }
 }
 
 static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
+    //logi("my_platform: device connected: %p\n", d);
     uint8_t idx = uni_hid_device_get_idx_for_instance(d);
-    _is_connected[idx] = false;
-    gamecube_controller_connect(idx, false);
-    //logi("my_platform: device disconnected: %p\n", d);
+    static intercore_msg_s core1playermsg = {.id = IC_MSG_DISCONNECT};
+    
+    switch(idx)
+    {
+        case 0 ... 3:
+            core1playermsg.data = idx;
+            core0_send_message_safe(&core1playermsg);
+            _players[idx].connected = false;
+            _players[idx].rumble = false;
+        break;
+
+        default:
+        // Do nothing for other cases
+        break;
+    }
 }
 
 static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
@@ -90,69 +124,84 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
     return UNI_ERROR_SUCCESS;
 }
 
-volatile bool _should_rumble[4];
-bool _is_rumbling[4];
-interval_s rumbleinterval[4];
-interval_s keepaliveinterval[4];
-
-
-auto_init_mutex(rumble_mutex);
-
-void my_platform_set_rumble(uint8_t idx, bool rumble)
+void _my_platform_process_rumble(uint32_t timestamp, uint8_t idx)
 {
-    if(!_is_connected[idx]) return;
+    if(!_players[idx].connected) return;
 
-    uint32_t timestamp = gamecube_get_timestamp();
+    interval_s *r = &(_players[idx].rumble_interval);
+    bool state = _players[idx].rumble;
+    uni_hid_device_t *d = _players[idx].device_ptr;
 
-    if(rumble)
+    if(interval_run(timestamp, 64000, r))
     {
-        if(!_is_rumbling[idx])
-        {
-            _d[idx]->report_parser.play_dual_rumble(_d[idx], 0 /* delayed start ms */, 32 /* duration ms */, 128 /* weak magnitude */,
-                                                40 /* strong magnitude */);
-            interval_resettable_run(timestamp, 32000, true, &(rumbleinterval[idx]));
-            _is_rumbling[idx] = true;
-        }
+        if(state)
+        d->report_parser.play_dual_rumble(d, 0, 128, 128, 40);
         else
-        {
-            if(interval_resettable_run(timestamp, 32000, false, &(rumbleinterval[idx])))
-            {
-                _d[idx]->report_parser.play_dual_rumble(_d[idx], 0 /* delayed start ms */, 32 /* duration ms */, 128 /* weak magnitude */,
-                                                40 /* strong magnitude */);
-            }
-        }
+        d->report_parser.play_dual_rumble(d, 0, 0, 0, 0);
     }
-    else _is_rumbling[idx] = false;
-
-
 }
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
-    static uint8_t leds = 0;
-    static uint8_t enabled = true;
-    static uni_controller_t prev = {0};
     uni_gamepad_t* gp;
-    uint8_t idx = 0;
-
-    //if (memcmp(&prev, ctl, sizeof(*ctl)) == 0) {
-    //    return;
-    //}
-    //prev = *ctl;
-
     
+    uint8_t idx = uni_hid_device_get_idx_for_instance(d);
 
-    // Print device Id before dumping gamepad.
-    //logi("(%p) id=%d ", d, idx);
-    //uni_controller_dump(ctl);
+    if(!_players[idx].led_set && (d->report_parser.set_player_leds!=NULL))
+    {
+        // Set player LEDs
+        d->report_parser.set_player_leds(d, ((1<<idx)&0xF));
+        _players[idx].led_set = true;
+    }
 
+    // Since this is the only real loop where we can hook into where we have guaranteed data
+    // we receive our intercore messages here
+    bool get = false;
+    static uint hook_idx = 0;
+
+    // Get the first connected player
+    // and use them as our hook point
+    for(uint i = 0; i < 4; i++)
+    {
+        if(_players[i].connected) 
+        {
+            hook_idx = i;
+            get = true;
+            break;
+        }
+    }
+
+    // Only get core1 message for first connected player
+    if(idx==hook_idx && get)
+    {
+        static intercore_msg_s core1msg = {0};
+        uint32_t timestamp = gamecube_get_timestamp();
+        if(core1_get_message_safe(&core1msg))
+        {
+            switch(core1msg.id)
+            {
+                default:
+                break;
+
+                case IC_MSG_RUMBLE:
+                    _players[0].rumble = core1msg.data & 0b1000;
+                    _players[1].rumble = core1msg.data & 0b100;
+                    _players[2].rumble = core1msg.data & 0b10;
+                    _players[3].rumble = core1msg.data & 0b1;
+
+                    _my_platform_process_rumble(timestamp, 0);
+                    _my_platform_process_rumble(timestamp, 1);
+                    _my_platform_process_rumble(timestamp, 2);
+                    _my_platform_process_rumble(timestamp, 3);
+                break;
+            }
+        }
+    }
+
+    // Send input message if it's a gamepad of valid type
     switch (ctl->klass) {
         case UNI_CONTROLLER_CLASS_GAMEPAD:
-            idx = uni_hid_device_get_idx_for_instance(d);
-            
-            _keep_alive[idx] = true;
 
             gp = &ctl->gamepad;
-
             bool a = gp->buttons & BUTTON_A;
             bool b = gp->buttons & BUTTON_B;
             bool x = gp->buttons & BUTTON_X;
@@ -174,41 +223,24 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
                 break;
             }
 
-            gamecube_comms_update(idx, gp);
+            // Send intercore message for input update
+            static intercore_msg_s inputmsg = {.id = IC_MSG_INPUT};
+            static uint8_t inputcounter = 0; // Increment inputs
+            
+            inputmsg.gp.axis_x          = gp->axis_x;
+            inputmsg.gp.axis_y          = gp->axis_y;
+            inputmsg.gp.axis_rx         = gp->axis_rx;
+            inputmsg.gp.axis_ry         = gp->axis_ry;
+            inputmsg.gp.dpad            = gp->dpad;
+            inputmsg.gp.brake           = gp->brake;
+            inputmsg.gp.throttle        = gp->throttle;
+            inputmsg.gp.buttons         = gp->buttons;
+            inputmsg.gp.misc_buttons    = gp->misc_buttons;
 
-            //// Debugging
-            //// Axis ry: control rumble
-            //if ((gp->buttons & BUTTON_A) && d->report_parser.play_dual_rumble != NULL) {
-            //    d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 250 /* duration ms */,
-            //                                      128 /* weak magnitude */, 0 /* strong magnitude */);
-            //}
-            //if ((gp->buttons & BUTTON_B) && d->report_parser.play_dual_rumble != NULL) {
-            //    d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 250 /* duration ms */,
-            //                                      0 /* weak magnitude */, 128 /* strong magnitude */);
-            //}
-            //// Buttons: Control LEDs On/Off
-            //if ((gp->buttons & BUTTON_X) && d->report_parser.set_player_leds != NULL) {
-            //    d->report_parser.set_player_leds(d, leds++ & 0x0f);
-            //}
-            //// Axis: control RGB color
-            //if ((gp->buttons & BUTTON_Y) && d->report_parser.set_lightbar_color != NULL) {
-            //    uint8_t r = (gp->axis_x * 256) / 512;
-            //    uint8_t g = (gp->axis_y * 256) / 512;
-            //    uint8_t b = (gp->axis_rx * 256) / 512;
-            //    d->report_parser.set_lightbar_color(d, r, g, b);
-            //}
-            //// Toggle Bluetooth connections
-            //if ((gp->buttons & BUTTON_SHOULDER_L) && enabled) {
-            //    logi("*** Disabling Bluetooth connections\n");
-            //    uni_bt_enable_new_connections_safe(false);
-            //    enabled = false;
-            //}
-            //if ((gp->buttons & BUTTON_SHOULDER_R) && !enabled) {
-            //    logi("*** Enabling Bluetooth connections\n");
-            //    uni_bt_enable_new_connections_safe(true);
-            //    enabled = true;
-            //}
-            //
+            inputmsg.data = (idx&3) | (inputcounter<<2);
+            core0_send_message_safe(&inputmsg);
+            inputcounter = (inputcounter+1) % 0b111111;
+
             break;
         case UNI_CONTROLLER_CLASS_BALANCE_BOARD:
             // Do something
@@ -226,6 +258,7 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
             loge("Unsupported controller class: %d\n", ctl->klass);
             break;
     }
+
 }
 
 static const uni_property_t* my_platform_get_property(uni_property_idx_t idx) {
@@ -239,7 +272,6 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
     switch (event) {
         case UNI_PLATFORM_OOB_GAMEPAD_SYSTEM_BUTTON:
             // Optional: do something when "system" button gets pressed.
-            trigger_event_on_gamepad((uni_hid_device_t*)data);
             break;
 
         case UNI_PLATFORM_OOB_BLUETOOTH_ENABLED:
@@ -251,16 +283,6 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
         default:
             //logi("my_platform_on_oob_event: unsupported event: 0x%04x\n", event);
             break;
-    }
-}
-
-//
-// Helpers
-//
-static void trigger_event_on_gamepad(uni_hid_device_t* d) {
-    if (d->report_parser.play_dual_rumble != NULL) {
-        d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 50 /* duration ms */, 128 /* weak magnitude */,
-                                          40 /* strong magnitude */);
     }
 }
 

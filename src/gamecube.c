@@ -13,6 +13,9 @@
 
 #include "joybus.pio.h"
 #include "hardware/structs/pio.h"
+#include "intercore.h"
+
+// GAMECUBE.C FUNCTIONS RUN ON CORE 0
 
 #define PIO_SM_0_IRQ 0b0001
 #define PIO_SM_1_IRQ 0b0010
@@ -25,46 +28,6 @@
 #define CLAMP_0_255(value) ((value) < 0 ? 0 : ((value) > 255 ? 255 : (value)))
 
 #define JOYBUS_CHANNELS 4
-
-typedef struct
-{
-    union
-    {
-        struct
-        {
-            uint8_t button_a : 1;
-            uint8_t button_b : 1;
-            uint8_t button_x : 1;
-            uint8_t button_y : 1;
-            uint8_t button_start : 1;
-            uint8_t blank_1 : 3;
-        };
-        uint8_t buttons_1;
-    };
-
-    union
-    {
-        struct
-        {
-            uint8_t dpad_left   : 1;
-            uint8_t dpad_right  : 1;
-            uint8_t dpad_down   : 1;
-            uint8_t dpad_up     : 1;
-            uint8_t button_z    : 1;
-            uint8_t button_r    : 1;
-            uint8_t button_l    : 1;
-            uint8_t blank_2     : 1;
-        };
-        uint8_t buttons_2;
-    };
-
-    uint8_t stick_left_x;
-    uint8_t stick_left_y;
-    uint8_t stick_right_x;
-    uint8_t stick_right_y;
-    uint8_t analog_trigger_l;
-    uint8_t analog_trigger_r;
-} __attribute__ ((packed)) gamecube_input_s;
 
 const uint joybus_pins[4] = PINS_JOYBUS;
 
@@ -79,6 +42,36 @@ uint32_t gamecube_get_timestamp()
   mutex_exit(&timestamp_mutex);
 
   return ret;
+}
+
+bool interval_run(uint32_t timestamp, uint32_t interval, interval_s *state)
+{
+  state->this_time = timestamp;
+
+  // Clear variable
+  uint32_t diff = 0;
+
+  // Handle edge case where time has
+  // looped around and is now less
+  if (state->this_time < state->last_time)
+  {
+    diff = (0xFFFFFFFF - state->last_time) + state->this_time;
+  }
+  else if (state->this_time > state->last_time)
+  {
+    diff = state->this_time - state->last_time;
+  }
+  else
+    return false;
+
+  // We want a target rate according to our variable
+  if (diff >= interval)
+  {
+    // Set the last time
+    state->last_time = state->this_time;
+    return true;
+  }
+  return false;
 }
 
 // This is a function that will return
@@ -134,8 +127,9 @@ volatile uint8_t _dmaOut[4][8];
 typedef struct
 {
   bool connected;
-  uint8_t byteCounter; // How many bytes left to read before we must respond
+  int byteCounter; // How many bytes left to read before we must respond
   uint8_t workingCmd;  // The current working command we received
+  uint8_t workingMode;
   bool lock; // Lock so it doesn't get interrupted
   bool rumble;         // if rumble is enabled or not
   int dma;
@@ -155,10 +149,10 @@ mutex_t _gamepad_mutex[4];
 
 #define ALIGNED_JOYBUS_8(val) ((val) << 24)
 
-volatile uint8_t _cannedProbe[3] = {0x09, 0x00, 0x03};
-volatile uint8_t _cannedProbeTX[4][3];
-volatile uint8_t _cannedOrigin[10] = {0x00, 128, 128, 128, 128, 128, 0x00, 0x00, 0x02, 0x02};
-volatile uint8_t _cannedOriginTX[4][10];
+uint8_t _cannedProbe[3] = {0x09, 0x00, 0x03};
+uint8_t _cannedProbeTX[4][3];
+uint8_t _cannedOrigin[10] = {0x00, 128, 128, 128, 128, 128, 0x00, 0x00, 0x02, 0x02};
+uint8_t _cannedOriginTX[4][10];
 
 void _gamecube_send_probe(uint sm)
 {
@@ -189,6 +183,8 @@ void _gamecube_reset_state(uint sm)
 }
 
 #define BYTECOUNT_DEFAULT 2
+#define BYTECOUNT_NULL -1
+#define BYTECOUNT_SWISS 10
 
 // Returns true if we are at the end of a command area (start response)
 bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
@@ -196,9 +192,18 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
   bool ret = false;
   uint8_t dat = 0;
 
-  if(_joybus_state[sm].byteCounter==BYTECOUNT_DEFAULT)
+  if(_joybus_state[sm].byteCounter==BYTECOUNT_NULL)
   {
     _joybus_state[sm].workingCmd = pio_sm_get(GAMEPAD_PIO, sm);
+    switch(_joybus_state[sm].workingCmd)
+    {
+      default:
+        _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+        break;
+      case GCUBE_CMD_SWISS:
+        _joybus_state[sm].byteCounter = BYTECOUNT_SWISS;
+        break;
+    }
   }
   else
   {
@@ -210,11 +215,22 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
   default:
     break;
 
-  case 0x42:
-    if(_joybus_state[sm].byteCounter == 0)
+  case GCUBE_CMD_SWISS:
+  {
+    if(!_joybus_state[sm].byteCounter)
+    {
+      _joybus_state[sm].byteCounter = BYTECOUNT_NULL;
+      _gamecube_reset_state(sm);
+      ret = true;
+    }
+  }
+  break;
+
+  case GCUBE_CMD_ORIGINEXT:
+    if(!_joybus_state[sm].byteCounter)
     {
       _gc_got_data[sm] = true;
-      _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+      _joybus_state[sm].byteCounter = BYTECOUNT_NULL;
       
       joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), joybus_pins[sm]);
       pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
@@ -226,14 +242,18 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
   break;
 
 
-  case 0x40:
+  case GCUBE_CMD_POLL:
 
-    if (_joybus_state[sm].byteCounter == 0)
+    if(_joybus_state[sm].byteCounter==1)
+    {
+      _joybus_state[sm].workingMode = dat;
+    }
+    if (!_joybus_state[sm].byteCounter)
     {
       _joybus_state[sm].rumble = (dat & 0x1) ? true : false;
 
       _gc_got_data[sm] = true;
-      _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+      _joybus_state[sm].byteCounter = BYTECOUNT_NULL;
       
       joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), joybus_pins[sm]);
       pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
@@ -246,9 +266,9 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
   break;
 
   
-  case 0x00:
+  case GCUBE_CMD_PROBE:
     _gc_got_data[sm] = true;
-    _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+    _joybus_state[sm].byteCounter = BYTECOUNT_NULL;
 
     joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), joybus_pins[sm]);
     pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
@@ -258,9 +278,9 @@ bool __time_critical_func(_gamecube_command_handler)(uint sm, uint8_t mask)
     ret = true;
     break;
 
-  case 0x41:
+  case GCUBE_CMD_ORIGIN:
     _gc_got_data[sm] = true;
-    _joybus_state[sm].byteCounter = BYTECOUNT_DEFAULT;
+    _joybus_state[sm].byteCounter = BYTECOUNT_NULL;
     
     joybus_set_in(false, GAMEPAD_PIO, sm, _gamecube_offset, &(_gamecube_c[sm]), joybus_pins[sm]);
     pio_set_sm_mask_enabled(GAMEPAD_PIO, (1<<sm), false);
@@ -317,27 +337,6 @@ static void _gamecube_isr_txdone(void)
   
 }
 
-void gamecube_controller_connect(int idx, bool connected)
-{
-  while(!_gc_running)
-  {busy_wait_ms(1);}
-
-  if(connected && !_joybus_state[idx].connected)
-  {
-    pio_sm_clear_fifos(GAMEPAD_PIO, idx);
-    _joybus_state[idx].connected = true;
-    _joybus_state[idx].byteCounter = BYTECOUNT_DEFAULT;
-    _joybus_state[idx].workingCmd = 0x00;
-    _joybus_state[idx].rumble = false;
-    joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, idx, _gamecube_offset, joybus_pins[idx], &(_gamecube_c[idx]));
-  }
-  else if(!connected)
-  {
-    _joybus_state[idx].connected = false;
-  }
-  
-}
-
 #define ANALOG_F_CONST (float) (0.21484375f)
 
 uint8_t _gamecube_analog_helper(int32_t input)
@@ -356,23 +355,153 @@ uint8_t _gamecube_analog_trigger_helper(int32_t input)
   return val;
 }
 
-void gamecube_comms_update(int idx, uni_gamepad_t *gp)
+interval_s interval[4];
+
+void _message_handle_connect(uint player, bool connected)
 {
-  mutex_enter_blocking(&(_gamepad_mutex[idx]));
-  _incoming_gamepad[idx].buttons = gp->buttons;
-  _incoming_gamepad[idx].misc_buttons = gp->misc_buttons;
-  _incoming_gamepad[idx].dpad = gp->dpad;
-  _incoming_gamepad[idx].axis_x = gp->axis_x;
-  _incoming_gamepad[idx].axis_y = gp->axis_y;
-  _incoming_gamepad[idx].axis_rx = gp->axis_rx;
-  _incoming_gamepad[idx].axis_ry = gp->axis_ry;
-  _incoming_gamepad[idx].brake = gp->brake;
-  _incoming_gamepad[idx].throttle = gp->throttle;
-  _in_buffer_update[idx] = true;
-  mutex_exit(&(_gamepad_mutex[idx]));
+  if(connected && !_joybus_state[player].connected)
+  {
+    pio_sm_clear_fifos(GAMEPAD_PIO, player);
+    _joybus_state[player].connected = true;
+    _joybus_state[player].byteCounter = BYTECOUNT_DEFAULT;
+    _joybus_state[player].workingCmd = 0x00;
+    _joybus_state[player].rumble = false;
+    joybus_program_init(SYS_CLK_SPEED_HZ, GAMEPAD_PIO, player, _gamecube_offset, joybus_pins[player], &(_gamecube_c[player]));
+  }
+  else if(!connected)
+  {
+    _joybus_state[player].connected = false;
+  }
 }
 
-interval_s interval[4];
+void _message_handle_input(uint player, intercore_msg_s *msg)
+{
+  _out_buffer[player].blank_2 = 1;
+  _out_buffer[player].a        = (msg->gp.buttons & BUTTON_A) ? true : false;
+  _out_buffer[player].b        = (msg->gp.buttons & BUTTON_B) ? true : false;
+  _out_buffer[player].x        = (msg->gp.buttons & BUTTON_X) ? true : false;
+  _out_buffer[player].y        = (msg->gp.buttons & BUTTON_Y) ? true : false;
+
+  _out_buffer[player].start    = (msg->gp.misc_buttons & MISC_BUTTON_START) ? true : false;
+  _out_buffer[player].start    |= (msg->gp.misc_buttons & MISC_BUTTON_SYSTEM) ? true : false;
+
+  _out_buffer[player].z = (msg->gp.buttons & BUTTON_SHOULDER_R) ? true : false;
+
+  uint8_t lt8 = 0;
+  uint8_t rt8 = 0;
+  uint8_t outl = 0;
+  uint8_t outr = 0;
+
+  uint8_t lx8 = 0;
+  uint8_t ly8 = 0;
+  uint8_t rx8 = 0;
+  uint8_t ry8 = 0;
+
+  lx8   = _gamecube_analog_helper(msg->gp.axis_x);
+  ly8   = _gamecube_analog_helper(-msg->gp.axis_y);
+  rx8   = _gamecube_analog_helper(msg->gp.axis_rx);
+  ry8   = _gamecube_analog_helper(-msg->gp.axis_ry);
+
+  _out_buffer[player].dpad_down     = (msg->gp.dpad & DPAD_DOWN) ? true : false;
+  _out_buffer[player].dpad_left     = (msg->gp.dpad & DPAD_LEFT) ? true : false;
+  _out_buffer[player].dpad_right    = (msg->gp.dpad & DPAD_RIGHT) ? true : false;
+  _out_buffer[player].dpad_up       = (msg->gp.dpad & DPAD_UP) ? true : false;
+
+  uint8_t al = _gamecube_analog_trigger_helper(msg->gp.brake);
+  uint8_t ar = _gamecube_analog_trigger_helper(msg->gp.throttle);
+
+  bool alb = (msg->gp.buttons & BUTTON_TRIGGER_L) ? true : false;
+  bool arb = (msg->gp.buttons & BUTTON_TRIGGER_R) ? true : false;
+
+  if(al>245)
+  {
+    if(alb) al = 255;
+    alb = true;
+  }
+  else if (al>0)
+  {
+    alb = false;
+  }
+  else
+  {
+    al = (alb) ? 255 : 0;
+  }
+
+  if(ar>245)
+  {
+    if(arb) ar = 255;
+    arb = true;
+  }
+  else if (ar>0)
+  {
+    arb = false;
+  }
+  else
+  {
+    ar = (arb) ? 255 : 0;
+  }
+
+  lt8 = al;
+  rt8 = ar;
+  _out_buffer[player].l = alb;
+  _out_buffer[player].r = arb;
+  _in_buffer_update[player] = false;
+
+  switch(_joybus_state[player].workingMode)
+  {
+    // Default is mode 3
+    default:
+      _out_buffer[player].stick_left_x  = lx8;
+      _out_buffer[player].stick_left_y  = ly8;
+      _out_buffer[player].stick_right_x = rx8;
+      _out_buffer[player].stick_right_y = ry8;
+      _out_buffer[player].analog_trigger_l  = lt8;
+      _out_buffer[player].analog_trigger_r  = rt8;
+    break;
+
+    case 0:
+      _out_buffer[player].mode0.stick_left_x  = lx8;
+      _out_buffer[player].mode0.stick_left_y  = ly8;
+      _out_buffer[player].mode0.stick_right_x = rx8;
+      _out_buffer[player].mode0.stick_right_y = ry8;
+      _out_buffer[player].mode0.analog_trigger_l  = lt8>>4;
+      _out_buffer[player].mode0.analog_trigger_r  = rt8>>4;
+      _out_buffer[player].mode0.analog_a = 0; // 4bits
+      _out_buffer[player].mode0.analog_b = 0; // 4bits
+    break;
+
+    case 1:
+      _out_buffer[player].mode1.stick_left_x  = lx8;
+      _out_buffer[player].mode1.stick_left_y  = ly8;
+      _out_buffer[player].mode1.stick_right_x = rx8>>4;
+      _out_buffer[player].mode1.stick_right_y = ry8>>4;
+      _out_buffer[player].mode1.analog_trigger_l  = lt8;
+      _out_buffer[player].mode1.analog_trigger_r  = rt8;
+      _out_buffer[player].mode1.analog_a = 0; // 4bits
+      _out_buffer[player].mode1.analog_b = 0; // 4bits
+    break;
+
+    case 2:
+      _out_buffer[player].mode2.stick_left_x  = lx8;
+      _out_buffer[player].mode2.stick_left_y  = ly8;
+      _out_buffer[player].mode2.stick_right_x = rx8>>4;
+      _out_buffer[player].mode2.stick_right_y = ry8>>4;
+      _out_buffer[player].mode2.analog_trigger_l  = lt8>>4;
+      _out_buffer[player].mode2.analog_trigger_r  = rt8>>4;
+      _out_buffer[player].mode2.analog_a = 0;
+      _out_buffer[player].mode2.analog_b = 0;
+    break;
+
+    case 4:
+      _out_buffer[player].mode4.stick_left_x  = lx8;
+      _out_buffer[player].mode4.stick_left_y  = ly8;
+      _out_buffer[player].mode4.stick_right_x = rx8;
+      _out_buffer[player].mode4.stick_right_y = ry8;
+      _out_buffer[player].mode4.analog_a = 0;
+      _out_buffer[player].mode4.analog_b = 0;
+    break;
+  }
+}
 
 void gamecube_comms_task()
 {
@@ -428,6 +557,9 @@ void gamecube_comms_task()
     //irq_set_enabled(_gamecube_irq_tx, true);
     irq_set_enabled(_gamecube_irq_rx, true);
     _gc_running = true;
+
+    // DEBUG
+    //_message_handle_connect(0, true);
   }
   else
   {
@@ -443,80 +575,49 @@ void gamecube_comms_task()
       if (_gc_got_data[i]) _gc_got_data[i]=false;
       
     }
-    
-    for(uint i = 0; i < JOYBUS_CHANNELS; i++)
+
+    // Get any pending messages and act on them
+    static intercore_msg_s core0msg = {0};
+    static uni_gamepad_t core0msggp = {0};
+    if(core0_get_message_safe(&core0msg))
     {
-      my_platform_set_rumble(i, _joybus_state[i].rumble);
-
-      if (_in_buffer_update[i])
+      switch(core0msg.id)
       {
-        if(mutex_enter_timeout_ms(&(_gamepad_mutex[i]), 1))
-        {
-          
+        default:
+        break;
 
-          _out_buffer[i].blank_2 = 1;
-          _out_buffer[i].button_a        = (_incoming_gamepad[i].buttons & BUTTON_A) ? true : false;
-          _out_buffer[i].button_b        = (_incoming_gamepad[i].buttons & BUTTON_B) ? true : false;
-          _out_buffer[i].button_x        = (_incoming_gamepad[i].buttons & BUTTON_X) ? true : false;
-          _out_buffer[i].button_y        = (_incoming_gamepad[i].buttons & BUTTON_Y) ? true : false;
+        case IC_MSG_CONNECT:
+          _message_handle_connect(core0msg.data, true);
+        break;
 
-          _out_buffer[i].button_start    = (_incoming_gamepad[i].misc_buttons & MISC_BUTTON_START) ? true : false;
-          _out_buffer[i].button_start    |= (_incoming_gamepad[i].misc_buttons & MISC_BUTTON_SYSTEM) ? true : false;
+        case IC_MSG_DISCONNECT:
+          _message_handle_connect(core0msg.data, false);
+        break;
 
-          _out_buffer[i].button_z = (_incoming_gamepad[i].buttons & BUTTON_SHOULDER_R) ? true : false;
-
-          _out_buffer[i].stick_left_x = _gamecube_analog_helper(_incoming_gamepad[i].axis_x);
-          _out_buffer[i].stick_left_y = _gamecube_analog_helper(-_incoming_gamepad[i].axis_y);
-          _out_buffer[i].stick_right_x = _gamecube_analog_helper(_incoming_gamepad[i].axis_rx);
-          _out_buffer[i].stick_right_y = _gamecube_analog_helper(-_incoming_gamepad[i].axis_ry);
-
-          _out_buffer[i].dpad_down     = (_incoming_gamepad[i].dpad & DPAD_DOWN) ? true : false;
-          _out_buffer[i].dpad_left     = (_incoming_gamepad[i].dpad & DPAD_LEFT) ? true : false;
-          _out_buffer[i].dpad_right    = (_incoming_gamepad[i].dpad & DPAD_RIGHT) ? true : false;
-          _out_buffer[i].dpad_up       = (_incoming_gamepad[i].dpad & DPAD_UP) ? true : false;
-
-          uint8_t al = _gamecube_analog_trigger_helper(_incoming_gamepad[i].brake);
-          uint8_t ar = _gamecube_analog_trigger_helper(_incoming_gamepad[i].throttle);
-
-          bool alb = (_incoming_gamepad[i].buttons & BUTTON_TRIGGER_L) ? true : false;
-          bool arb = (_incoming_gamepad[i].buttons & BUTTON_TRIGGER_R) ? true : false;
-
-          if(al>245)
-          {
-            if(alb) al = 255;
-            alb = true;
-          }
-          else if (al>0)
-          {
-            alb = false;
-          }
-          else
-          {
-            al = (alb) ? 255 : 0;
-          }
-
-          if(ar>245)
-          {
-            if(arb) ar = 255;
-            arb = true;
-          }
-          else if (ar>0)
-          {
-            arb = false;
-          }
-          else
-          {
-            ar = (arb) ? 255 : 0;
-          }
-
-          _out_buffer[i].analog_trigger_l = al;
-          _out_buffer[i].analog_trigger_r = ar;
-          _out_buffer[i].button_l = alb;
-          _out_buffer[i].button_r = arb;
-          _in_buffer_update[i] = false;
-          mutex_exit(&(_gamepad_mutex[i]));
-        }
+        case IC_MSG_INPUT:
+          _message_handle_input( (core0msg.data & 0b11), &core0msg);
+        break;
       }
-    } 
+    }
+  
+    // Rumble handling to core 1
+    {
+      // Use 4 bits to signal rumble in one message
+      static uint8_t currentrumblestate = 0b0000;
+      static uint8_t newrumblestate = 0b0000;
+
+      newrumblestate = (_joybus_state[0].rumble<<3) | (_joybus_state[1].rumble<<2) | (_joybus_state[2].rumble<<1) | (_joybus_state[3].rumble);
+      static intercore_msg_s core1outmsg = {0};
+
+      if(currentrumblestate != newrumblestate)
+      {
+        core1outmsg.id = IC_MSG_RUMBLE;
+        core1outmsg.data = newrumblestate;
+        currentrumblestate = newrumblestate;
+        core1_send_message_safe(&core1outmsg);
+      }
+
+    }
+
   }
 }

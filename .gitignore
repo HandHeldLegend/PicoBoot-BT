@@ -1,7 +1,9 @@
 
 src/ipl.h
 
-build/
+build/*
+!/build/picoblue.uf2
+/build/
 
 .vscode/
 
